@@ -31,9 +31,7 @@ type ShardCopyTask struct {
 	shardId     uint64
 	source      string
 	destination string
-	closer      interface {
-		Close() error
-	}
+	closer      io.Closer
 }
 
 type ShardCopyManager struct {
