@@ -7,7 +7,6 @@ import (
 	crand "crypto/rand"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -27,14 +26,14 @@ import (
 )
 
 const (
-	// SaltBytes is the number of bytes used for salts.
-	SaltBytes = 32
+	// SALT_LENGTH is the number of bytes used for salts.
+	SALT_LENGTH = 32
 
-	metaFile = "meta.db"
+	META_FILE = "meta.db"
 
-	// ShardGroupDeletedExpiration is the amount of time before a shard group info will be removed from cached
+	// SHARDGROUP_INFO_EVICTION is the amount of time before a shard group info will be removed from cached
 	// data after it has been marked deleted (2 weeks).
-	ShardGroupDeletedExpiration = -2 * 7 * 24 * time.Hour
+	SHARDGROUP_INFO_EVICTION = -2 * 7 * 24 * time.Hour
 )
 
 // Client is used to execute commands on and read data from
@@ -77,10 +76,6 @@ func NewClient(config *meta.Config) *Client {
 		path:                config.Dir,
 		retentionAutoCreate: config.RetentionAutoCreate,
 	}
-}
-
-func (c *Client) Print() {
-	fmt.Printf("%+v\n", c.cacheData)
 }
 
 // Open a connection to a meta service cluster.
@@ -134,28 +129,29 @@ func (c *Client) data() *Data {
 	return c.cacheData
 }
 
-// Node returns a node by id.
+// DataNode returns a node by id.
 func (c *Client) DataNode(id uint64) (*meta.NodeInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, n := range c.data().DataNodes {
-		if n.ID == id {
-			return &n, nil
-		}
+	n := c.data().DataNode(id)
+	if n == nil {
+		return nil, ErrNodeNotFound
 	}
-	return nil, ErrNodeNotFound
+	return n, nil
 }
 
-// DataNodes returns the data nodes' info.
-func (c *Client) DataNodes() ([]meta.NodeInfo, error) {
-	return c.data().DataNodes, nil
+// DataNodes returns all nodes
+func (c *Client) DataNodes() []meta.NodeInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.data().DataNodes
 }
 
 // CreateDataNode will create a new data node in the metastore
 func (c *Client) CreateDataNode(httpAddr, tcpAddr string) (*meta.NodeInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	err := c.data().CreateDataNode(httpAddr, tcpAddr)
+	_, err := c.data().CreateDataNode(httpAddr, tcpAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -172,10 +168,11 @@ func (c *Client) CreateDataNode(httpAddr, tcpAddr string) (*meta.NodeInfo, error
 
 // DataNodeByHTTPHost returns the data node with the give http bind address
 func (c *Client) DataNodeByHTTPHost(httpAddr string) (*meta.NodeInfo, error) {
-	nodes, _ := c.DataNodes()
+	nodes := c.data().DataNodes
 	for _, n := range nodes {
 		if n.Host == httpAddr {
-			return &n, nil
+			newN := n
+			return &newN, nil
 		}
 	}
 
@@ -184,10 +181,11 @@ func (c *Client) DataNodeByHTTPHost(httpAddr string) (*meta.NodeInfo, error) {
 
 // DataNodeByTCPHost returns the data node with the give http bind address
 func (c *Client) DataNodeByTCPHost(tcpAddr string) (*meta.NodeInfo, error) {
-	nodes, _ := c.DataNodes()
+	nodes := c.data().DataNodes
 	for _, n := range nodes {
 		if n.TCPHost == tcpAddr {
-			return &n, nil
+			newN := n
+			return &newN, nil
 		}
 	}
 
@@ -482,7 +480,7 @@ func (c *Client) hashWithSalt(salt []byte, password string) []byte {
 
 // saltedHash returns a salt and salted hash of password.
 func (c *Client) saltedHash(password string) (salt, hash []byte, err error) {
-	salt = make([]byte, SaltBytes)
+	salt = make([]byte, SALT_LENGTH)
 	if _, err := io.ReadFull(crand.Reader, salt); err != nil {
 		return nil, nil, err
 	}
@@ -785,7 +783,7 @@ func (c *Client) TruncateShardGroups(t time.Time) error {
 // PruneShardGroups remove deleted shard groups from the data store.
 func (c *Client) PruneShardGroups() error {
 	var changed bool
-	expiration := time.Now().Add(ShardGroupDeletedExpiration)
+	expiration := time.Now().Add(SHARDGROUP_INFO_EVICTION)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	data := c.cacheData.Clone()
@@ -1139,7 +1137,7 @@ func (c *Client) WithLogger(log *zap.Logger) {
 func snapshot(path string, data *Data) error {
 	//TODO: no need write snapshot to disk
 	return nil
-	filename := filepath.Join(path, metaFile)
+	filename := filepath.Join(path, META_FILE)
 	tmpFile := filename + "tmp"
 
 	f, err := os.Create(tmpFile)
@@ -1175,7 +1173,7 @@ func snapshot(path string, data *Data) error {
 func (c *Client) Load() error {
 	//TODO:no need load
 	return nil
-	file := filepath.Join(c.path, metaFile)
+	file := filepath.Join(c.path, META_FILE)
 
 	f, err := os.Open(file)
 	if err != nil {

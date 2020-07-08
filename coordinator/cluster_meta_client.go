@@ -2,10 +2,11 @@ package coordinator
 
 import (
 	"fmt"
+	"time"
+
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
-	"time"
 
 	imeta "github.com/angopher/chronus/services/meta"
 )
@@ -164,7 +165,7 @@ func (me *ClusterMetaClient) DataNode(id uint64) (*meta.NodeInfo, error) {
 }
 
 func (me *ClusterMetaClient) DataNodes() ([]meta.NodeInfo, error) {
-	return me.cache.DataNodes()
+	return me.cache.DataNodes(), nil
 }
 
 func (me *ClusterMetaClient) ShardOwner(id uint64) (string, string, *meta.ShardGroupInfo) {

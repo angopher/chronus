@@ -12,9 +12,11 @@ import (
 
 	"github.com/influxdata/influxdb"
 	"github.com/influxdata/influxdb/services/meta"
+	"github.com/influxdata/influxdb/tsdb"
 	"go.uber.org/zap"
 
 	"github.com/angopher/chronus/coordinator"
+	"github.com/angopher/chronus/services/migrate"
 )
 
 const (
@@ -33,26 +35,30 @@ type Service struct {
 		DataNodeByTCPHost(addr string) (*meta.NodeInfo, error)
 		RemoveShardOwner(shardID, nodeID uint64) error
 		DataNodes() ([]meta.NodeInfo, error)
+
+		ShardOwner(shardID uint64) (database, policy string, sgi *meta.ShardGroupInfo)
+		AddShardOwner(shardID, nodeID uint64) error
 	}
 
 	TSDBStore interface {
+		Path() string
+		ShardRelativePath(id uint64) (string, error)
+		CreateShard(database, retentionPolicy string, shardID uint64, enabled bool) error
 		DeleteShard(id uint64) error
+		Shard(id uint64) *tsdb.Shard
 	}
 
 	Listener net.Listener
 	Logger   *zap.Logger
 
-	ShardCopier interface {
-		CopyShard(sourceAddr string, shardId uint64) error
-		Query() []CopyShardTask
-		Kill(shardId uint64, source, destination string)
-	}
+	migrateManager *migrate.Manager
 }
 
 // NewService returns a new instance of Service.
 func NewService(c Config) *Service {
 	return &Service{
-		Logger: zap.NewNop(),
+		Logger:         zap.NewNop(),
+		migrateManager: migrate.NewManager(c.MaxShardCopyTasks),
 	}
 }
 
@@ -199,7 +205,7 @@ func (s *Service) handleCopyShard(conn net.Conn) error {
 		return err
 	}
 
-	s.ShardCopier.CopyShard(req.SourceNodeAddr, req.ShardID)
+	s.copyShard(req.SourceNodeAddr, req.ShardID)
 	return nil
 }
 
@@ -227,8 +233,23 @@ func (s *Service) copyShardResponse(w io.Writer, e error) {
 	}
 }
 
+func toCopyTask(t *migrate.Task) CopyShardTask {
+	task := CopyShardTask{}
+	task.CurrentSize = t.Copied
+	task.Database = t.Database
+	task.Rp = t.Retention
+	task.ShardID = t.ShardId
+	task.Source = t.SrcHost
+	return task
+}
+
 func (s *Service) handleCopyShardStatus(conn net.Conn) []CopyShardTask {
-	return s.ShardCopier.Query()
+	tasks := s.migrateManager.Tasks()
+	result := make([]CopyShardTask, len(tasks))
+	for i, t := range tasks {
+		result[i] = toCopyTask(t)
+	}
+	return result
 }
 
 func (s *Service) copyShardStatusResponse(w io.Writer, tasks []CopyShardTask) {
@@ -263,7 +284,7 @@ func (s *Service) handleKillCopyShard(conn net.Conn) error {
 		return err
 	}
 
-	s.ShardCopier.Kill(req.ShardID, req.SourceNodeAddr, req.DestNodeAddr)
+	s.migrateManager.Kill(req.ShardID, req.SourceNodeAddr)
 	return nil
 }
 
@@ -451,7 +472,7 @@ type TruncateShardResponse struct {
 
 type CopyShardRequest struct {
 	SourceNodeAddr string `json:"source_node_address"`
-	DestNodeAddr   string `json:"dest_node_address"`
+	DestNodeAddr   string `json:"dest_node_address"` // is this necessary?
 	ShardID        uint64 `json:"shard_id"`
 }
 
@@ -463,7 +484,7 @@ type CopyShardTask struct {
 	Database    string `json:"database"`
 	Rp          string `json:"retention_policy"`
 	ShardID     uint64 `json:"shard_id"`
-	TotalSize   uint64 `json:"total_size"`
+	TotalSize   uint64 `json:"total_size"` // is this necessary? currently it's ignored.
 	CurrentSize uint64 `json:"current_size"`
 	Source      string `json:"source"`
 	Destination string `json:"destination"`

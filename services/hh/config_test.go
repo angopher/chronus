@@ -1,16 +1,15 @@
-package hh_test
+package hh
 
 import (
 	"testing"
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/influxdata/influxdb/services/hh"
 )
 
 func TestConfigParse(t *testing.T) {
 	// Parse configuration.
-	var c hh.Config
+	var c Config
 	if _, err := toml.Decode(`
 enabled = false
 retry-interval = "10m"
@@ -56,7 +55,7 @@ purge-interval = "1h"
 
 func TestDefaultDisabled(t *testing.T) {
 	// Parse empty configuration.
-	var c hh.Config
+	var c Config
 	if _, err := toml.Decode(``, &c); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +65,7 @@ func TestDefaultDisabled(t *testing.T) {
 	}
 
 	// Default configuration.
-	c = hh.NewConfig()
+	c = NewConfig()
 	if exp := false; c.Enabled == true {
 		t.Fatalf("unexpected default enabled value: got %v, exp %v", c.Enabled, exp)
 	}

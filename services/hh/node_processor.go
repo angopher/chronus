@@ -1,6 +1,7 @@
 package hh
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -9,9 +10,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/influxdata/influxdb/models"
 	"strings"
 	"sync/atomic"
+
+	"github.com/influxdata/influxdb/models"
+	"golang.org/x/time/rate"
 )
 
 const (
@@ -28,7 +31,7 @@ type NodeProcessor struct {
 	RetryMaxInterval time.Duration // Max interval between periodic write-to-node attempts.
 	MaxSize          int64         // Maximum size an underlying queue can get.
 	MaxAge           time.Duration // Maximum age queue data can get before purging.
-	RetryRateLimit   int64         // Limits the rate data is sent to node.
+	RetryRateLimit   int           // Limits the rate data is sent to node.
 	nodeID           uint64
 	dir              string
 
@@ -202,7 +205,8 @@ func (n *NodeProcessor) run() {
 			}
 
 		case <-time.After(currInterval):
-			limiter := NewRateLimiter(n.RetryRateLimit)
+			limiter := rate.NewLimiter(rate.Limit(n.RetryRateLimit), 10*n.RetryRateLimit)
+			ctx := context.Background()
 			for {
 				c, err := n.SendWrite()
 				if err != nil {
@@ -221,11 +225,7 @@ func (n *NodeProcessor) run() {
 				// Success! Ensure backoff is cancelled.
 				currInterval = time.Duration(n.RetryInterval)
 
-				// Update how many bytes we've sent
-				limiter.Update(c)
-
-				// Block to maintain the throughput rate
-				time.Sleep(limiter.Delay())
+				limiter.WaitN(ctx, c)
 			}
 		}
 	}

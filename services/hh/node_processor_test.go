@@ -8,8 +8,7 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/models"
-
-	"github.com/angopher/chronus/services/meta"
+	"github.com/influxdata/influxdb/services/meta"
 )
 
 type fakeShardWriter struct {
@@ -36,7 +35,8 @@ func TestNodeProcessorSendBlock(t *testing.T) {
 
 	// expected data to be queue and sent to the shardWriter
 	var expShardID, expNodeID, count = uint64(100), uint64(200), 0
-	pt := models.MustNewPoint("cpu", models.Tags{"foo": "bar"}, models.Fields{"value": 1.0}, time.Unix(0, 0))
+	tag := models.Tag{Key: []byte("foo"), Value: []byte("bar")}
+	pt := models.MustNewPoint("cpu", models.Tags{tag}, models.Fields{"value": 1.0}, time.Unix(0, 0))
 
 	sh := &fakeShardWriter{
 		ShardWriteFn: func(shardID, nodeID uint64, points []models.Point) error {

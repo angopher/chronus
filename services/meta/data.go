@@ -24,18 +24,20 @@ type Data struct {
 func (data *Data) DataNode(id uint64) *meta.NodeInfo {
 	for i := range data.DataNodes {
 		if data.DataNodes[i].ID == id {
-			return &data.DataNodes[i]
+			// prevent unexpected modification
+			n := data.DataNodes[i]
+			return &n
 		}
 	}
 	return nil
 }
 
-// CreateDataNode adds a node to the metadata.
-func (data *Data) CreateDataNode(host, tcpHost string) error {
+// CreateDataNode adds a node to the metadata, return the nodeId(0 when an error occurred) and error
+func (data *Data) CreateDataNode(host, tcpHost string) (uint64, error) {
 	// Ensure a node with the same host doesn't already exist.
 	for _, n := range data.DataNodes {
 		if n.TCPHost == tcpHost || n.Host == host {
-			return ErrNodeExists
+			return 0, ErrNodeExists
 		}
 	}
 
@@ -63,7 +65,7 @@ func (data *Data) CreateDataNode(host, tcpHost string) error {
 	})
 	sort.Sort(meta.NodeInfos(data.DataNodes))
 
-	return nil
+	return existingID, nil
 }
 
 // DeleteDataNode removes a node from the Meta store.
@@ -202,18 +204,20 @@ func newShardOwner(s meta.ShardInfo, ownerFreqs map[int]int) (uint64, error) {
 func (data *Data) MetaNode(id uint64) *meta.NodeInfo {
 	for i := range data.MetaNodes {
 		if data.MetaNodes[i].ID == id {
-			return &data.MetaNodes[i]
+			// prevent unexpected modification
+			n := data.MetaNodes[i]
+			return &n
 		}
 	}
 	return nil
 }
 
 // CreateMetaNode will add a new meta node to the metastore
-func (data *Data) CreateMetaNode(httpAddr, tcpAddr string) error {
+func (data *Data) CreateMetaNode(httpAddr, tcpAddr string) (uint64, error) {
 	// Ensure a node with the same host doesn't already exist.
 	for _, n := range data.MetaNodes {
 		if n.Host == httpAddr {
-			return ErrNodeExists
+			return 0, ErrNodeExists
 		}
 	}
 
@@ -242,7 +246,7 @@ func (data *Data) CreateMetaNode(httpAddr, tcpAddr string) error {
 	})
 
 	sort.Sort(meta.NodeInfos(data.MetaNodes))
-	return nil
+	return existingID, nil
 }
 
 // DeleteMetaNode will remove the meta node from the store
