@@ -446,15 +446,7 @@ func (s *Server) appendControllerService(c controller.Config) {
 	srv.MetaClient = s.ClusterMetaClient
 	srv.Node = s.Node
 	srv.TSDBStore = s.TSDBStore
-	shardCopier := &controller.ShardCopier{
-		Manager:    controller.NewCopyManager(c.MaxShardCopyTasks),
-		MetaClient: s.ClusterMetaClient,
-		TSDBStore:  s.TSDBStore,
-		Node:       s.Node,
-	}
-	shardCopier.WithLogger(s.Logger)
 
-	srv.ShardCopier = shardCopier
 	s.ControllerService = srv
 	s.Services = append(s.Services, srv)
 }
