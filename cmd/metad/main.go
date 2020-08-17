@@ -3,24 +3,34 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/BurntSushi/toml"
 	"github.com/angopher/chronus/raftmeta"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
 	"github.com/influxdata/influxdb/logger"
 	"github.com/influxdata/influxdb/services/meta"
-	"os"
+	"go.uber.org/zap"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 func main() {
-	configFile := flag.String("config", "", "-config config_file")
-	flag.Parse()
+	f := flag.NewFlagSet("metad", flag.ExitOnError)
+	configFile := f.String("config", "", "Specify config file")
+	logDir := f.String("logdir", "", "Log to specified directory")
+	f.Parse(os.Args[1:])
 
 	config := raftmeta.NewConfig()
 	if *configFile != "" {
 		x.Check((&config).FromTomlFile(*configFile))
 	} else {
+		fmt.Print("Sample configuration:\n\n")
 		toml.NewEncoder(os.Stdout).Encode(&config)
+		fmt.Println()
+		f.Usage()
 		return
 	}
 
@@ -31,7 +41,19 @@ func main() {
 		LoggingEnabled:      true,
 	})
 
-	log := logger.New(os.Stderr)
+	var log *zap.Logger
+	if *logDir != "" {
+		dir := strings.TrimRight(*logDir, string(filepath.Separator))
+		log = logger.New(&lumberjack.Logger{
+			Filename:   filepath.Join(dir, "metad.log"),
+			MaxSize:    100,
+			MaxBackups: 5,
+			Compress:   true,
+		})
+		log.WithOptions()
+	} else {
+		log = logger.New(os.Stderr)
+	}
 
 	metaCli.WithLogger(log)
 	err := metaCli.Open()
