@@ -5,6 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
+
 	"github.com/angopher/chronus/raftmeta/internal"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
@@ -17,11 +23,6 @@ import (
 	"github.com/influxdata/influxdb/services/meta"
 	"go.uber.org/zap"
 	"golang.org/x/net/trace"
-	"math/rand"
-	"os"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 var errInternalRetry = errors.New("Retry Raft proposal internally")
@@ -264,14 +265,14 @@ func (s *RaftNode) leaderChangedNotify() <-chan struct{} {
 	return s.leaderChanged
 }
 
-func (s *RaftNode) restoreFromSnapshot() {
+func (s *RaftNode) restoreFromSnapshot() bool {
 	s.Logger.Info("restore from snapshot")
 	sp, err := s.Storage.Snapshot()
 	x.Checkf(err, "Unable to get existing snapshot")
 
 	if raft.IsEmptySnap(sp) {
 		s.Logger.Info("empty snapshot. ignore")
-		return
+		return false
 	}
 	s.SetConfState(&sp.Metadata.ConfState)
 	s.setAppliedIndex(sp.Metadata.Index)
@@ -288,10 +289,18 @@ func (s *RaftNode) restoreFromSnapshot() {
 
 	err = s.MetaCli.ReplaceData(metaData)
 	x.Checkf(err, "meta cli ReplaceData fail")
+
+	return true
+}
+
+func (s *RaftNode) resetPeersFromConfig() {
+	for _, peer := range s.Config.Peers {
+		s.Transport.SetPeer(peer.RaftId, peer.Addr)
+	}
 }
 
 func (s *RaftNode) InitAndStartNode() {
-	peers := []raft.Peer{}
+	peers := make([]raft.Peer, 0, len(s.Config.Peers))
 	for _, p := range s.Config.Peers {
 		rc := internal.RaftContext{Addr: p.Addr, ID: p.RaftId}
 		data, err := json.Marshal(&rc)
@@ -305,8 +314,11 @@ func (s *RaftNode) InitAndStartNode() {
 
 	if restart {
 		s.Logger.Info("Restarting node")
-		s.restoreFromSnapshot()
+		restored := s.restoreFromSnapshot()
 		s.Node = raft.RestartNode(s.RaftConfig)
+		if !restored {
+			s.resetPeersFromConfig()
+		}
 	} else {
 		s.Logger.Info("Starting node")
 		if len(peers) == 0 {
@@ -315,7 +327,7 @@ func (s *RaftNode) InitAndStartNode() {
 			x.Check(err)
 			s.Node = raft.StartNode(s.RaftConfig, []raft.Peer{{ID: s.ID, Context: data}})
 		} else {
-			rpeers := make([]raft.Peer, 0)
+			rpeers := make([]raft.Peer, 0, len(s.Config.Peers))
 			for _, peer := range s.Config.Peers {
 				rpeers = append(rpeers, raft.Peer{ID: uint64(peer.RaftId)})
 			}
@@ -323,13 +335,7 @@ func (s *RaftNode) InitAndStartNode() {
 			//x.Checkf(err, "join peers fail")
 			//s.Logger.Info("join peers success")
 			s.Node = raft.StartNode(s.RaftConfig, rpeers)
-
-			for _, peer := range s.Config.Peers {
-				if peer.RaftId != s.ID {
-					s.Transport.SetPeer(peer.RaftId, peer.Addr)
-				}
-			}
-
+			s.resetPeersFromConfig()
 		}
 	}
 }

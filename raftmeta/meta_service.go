@@ -21,6 +21,30 @@ type CommonResp struct {
 	RetMsg  string `json:"ret_msg"`
 }
 
+type NodeStatus struct {
+	ID       uint64 `json:"id"`
+	Addr     string `json:"addr"`
+	Vote     uint64 `json:"vote"`
+	Match    uint64 `json:"match"`
+	Next     uint64 `json:"next"`
+	Role     string `json:"role"`
+	Progress string `json:"progress"`
+}
+
+type StatusNodeResp struct {
+	CommonResp
+	Status NodeStatus `json:"status"`
+}
+
+type StatusClusterResp struct {
+	CommonResp
+	Term    uint64       `json:"term"`
+	Commit  uint64       `json:"commit"`
+	Applied uint64       `json:"applied"`
+	Leader  uint64       `json:"leader"`
+	Nodes   []NodeStatus `json:"nodes"`
+}
+
 type MetaService struct {
 	Logger        *zap.Logger
 	Addr          string
@@ -54,6 +78,12 @@ func (s *MetaService) InitRouter() {
 	})
 	http.HandleFunc("/update_cluster", func(w http.ResponseWriter, r *http.Request) {
 		s.Node.HandleUpdateCluster(w, r)
+	})
+	http.HandleFunc("/status_cluster", func(w http.ResponseWriter, r *http.Request) {
+		s.Node.HandleStatusCluster(w, r)
+	})
+	http.HandleFunc("/status_node", func(w http.ResponseWriter, r *http.Request) {
+		s.Node.HandleStatusNode(w, r)
 	})
 
 	initHttpHandler(s)

@@ -7,6 +7,7 @@ import (
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 
 	imeta "github.com/angopher/chronus/services/meta"
 )
@@ -70,23 +71,9 @@ func (me *ClusterMetaClient) syncData() error {
 func (me *ClusterMetaClient) RunSyncLoop() {
 	//sync data first and will signal changes
 	me.syncData()
-	go func() {
-		printTicker := time.NewTicker(10 * time.Second)
-		for {
-			//for print sync status
-			select {
-			case <-printTicker.C:
-				index, err := me.metaCli.Ping()
-				if err != nil {
-					me.Logger.Warn("Ping fail", zap.Error(err))
-					continue
-				}
-				me.Logger.Info(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
-			}
-		}
-	}()
 
 	ticker := time.NewTicker(time.Duration(me.pingIntervalMs) * time.Millisecond)
+	printLimiter := rate.NewLimiter(0.1, 1)
 	for {
 		select {
 		case <-ticker.C:
@@ -104,10 +91,15 @@ func (me *ClusterMetaClient) RunSyncLoop() {
 				}
 			} else if index < me.cache.DataIndex() {
 				me.Logger.Warn(fmt.Sprintf("index:%d < local index:%d", index, me.cache.DataIndex()))
+			} else {
+				// normal
+				if printLimiter.Allow() {
+					// one log in 10 seconds
+					me.Logger.Info(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
+				}
 			}
 		}
 	}
-	return
 }
 
 func (me *ClusterMetaClient) CreateDatabase(name string) (*meta.DatabaseInfo, error) {

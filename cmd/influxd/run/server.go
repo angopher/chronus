@@ -122,7 +122,7 @@ func updateTLSConfig(into **tls.Config, with *tls.Config) {
 }
 
 // NewServer returns a new instance of Server built from a config.
-func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
+func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, error) {
 	// First grab the base tls config we will use for all clients and servers
 	tlsConfig, err := c.TLS.Parse()
 	if err != nil {
@@ -186,7 +186,7 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 
 		Node: node,
 
-		Logger: logger.New(os.Stderr),
+		Logger: logger,
 
 		ClusterMetaClient: coordinator.NewMetaClient(c.Meta, c.Coordinator, nodeID),
 

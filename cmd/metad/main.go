@@ -50,7 +50,6 @@ func main() {
 			MaxBackups: 5,
 			Compress:   true,
 		})
-		log.WithOptions()
 	} else {
 		log = logger.New(os.Stderr)
 	}
