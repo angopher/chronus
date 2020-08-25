@@ -18,6 +18,26 @@ import (
 	"github.com/coreos/etcd/raft"
 	"github.com/coreos/etcd/raft/raftpb"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
+)
+
+var (
+	loggingLimiter = rate.NewLimiter(1, 1)
+	httpClient     = http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+				DualStack: true,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
 )
 
 type Transport struct {
@@ -89,7 +109,7 @@ func (t *Transport) SendMessage(messages []raftpb.Message) {
 		}
 		url := fmt.Sprintf("http://%s/message", addr)
 		err = Request(url, data)
-		if err != nil {
+		if err != nil && loggingLimiter.Allow() {
 			t.Logger.Error("Request fail:", zap.Error(err), zap.String("url", url))
 		}
 	}
@@ -123,11 +143,13 @@ func (s *RaftNode) HandleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 	defer WriteResp(w, &resp)
 
 	var err error
+	peers := s.Transport.ClonePeers()
 	typ := raftpb.ConfChangeAddNode
 	data := []byte{}
 	var nodeId uint64
 	op := r.FormValue("op")
-	if op == "add" || op == "update" {
+	switch op {
+	case "add", "update":
 		data, err = ioutil.ReadAll(r.Body)
 		if err != nil {
 			resp.RetMsg = err.Error()
@@ -137,11 +159,37 @@ func (s *RaftNode) HandleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		err = json.Unmarshal(data, &rc)
 		x.Check(err)
 		nodeId = rc.ID
-	} else if op == "remove" {
-		typ = raftpb.ConfChangeRemoveNode
+
+		// check addr
+		for _, addr := range peers {
+			if addr == rc.Addr {
+				resp.RetMsg = "specified node address already exists"
+				return
+			}
+		}
+
+		// check node id
+		switch op {
+		case "add":
+			if _, ok := peers[nodeId]; ok {
+				resp.RetMsg = fmt.Sprintf("specified node id already exists: %d", nodeId)
+				return
+			}
+		case "update":
+			if _, ok := peers[nodeId]; !ok {
+				resp.RetMsg = fmt.Sprintf("specified node id doesn't exist: %d", nodeId)
+				return
+			}
+		}
+	case "remove":
 		nodeId, err = strconv.ParseUint(r.FormValue("node_id"), 10, 64)
+		if _, ok := peers[nodeId]; !ok {
+			resp.RetMsg = fmt.Sprintf("unkown node id: %d", nodeId)
+			return
+		}
+		typ = raftpb.ConfChangeRemoveNode
 		x.Check(err)
-	} else {
+	default:
 		resp.RetMsg = fmt.Sprintf("unkown op:%s", op)
 		return
 	}
@@ -273,23 +321,8 @@ func postRequest(url string, data []byte) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Connection", "close")
 
-	client := http.Client{
-		Transport: &http.Transport{
-			Dial: func(netw, addr string) (net.Conn, error) {
-				deadline := time.Now().Add(10 * time.Second) //TODO: timeout from config
-				c, err := net.DialTimeout(netw, addr, time.Second)
-				if err != nil {
-					return nil, err
-				}
-				c.SetDeadline(deadline)
-				return c, nil
-			},
-		},
-	}
-
-	res, err := client.Do(req)
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

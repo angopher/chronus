@@ -11,6 +11,7 @@ require (
 	github.com/dgraph-io/dgo v0.0.0-20190201214300-d5a1729ba705 // indirect
 	github.com/dgraph-io/dgraph v1.0.11
 	github.com/dgryski/go-farm v0.0.0-20190104051053-3adb47b1fb0f // indirect
+	github.com/fatih/color v1.7.0
 	github.com/gogo/protobuf v1.2.1
 	github.com/golang/snappy v0.0.0-20180518054509-2e65f85255db
 	github.com/google/go-cmp v0.2.0
@@ -26,6 +27,7 @@ require (
 	github.com/pkg/profile v1.2.1 // indirect
 	github.com/spf13/cobra v0.0.3
 	github.com/stretchr/testify v1.5.1 // test
+	github.com/urfave/cli/v2 v2.2.0
 	github.com/xlab/treeprint v0.0.0-20181112141820-a009c3971eca // indirect
 	go.opencensus.io v0.19.0 // indirect
 	go.uber.org/zap v1.15.0
