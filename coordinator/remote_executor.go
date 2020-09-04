@@ -2,18 +2,22 @@ package coordinator
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"time"
 
+	"github.com/angopher/chronus/x"
 	"github.com/influxdata/influxdb/pkg/tracing"
 	"github.com/influxdata/influxdb/query"
-	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxdb/tsdb"
 	"github.com/influxdata/influxql"
+	"go.uber.org/zap"
 )
 
 type RemoteNodeExecutor interface {
+	WithLogger(log *zap.Logger)
+
 	TagKeys(nodeId uint64, ShardIDs []uint64, cond influxql.Expr) ([]tsdb.TagKeys, error)
 	TagValues(nodeId uint64, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagValues, error)
 	MeasurementNames(nodeId uint64, database string, cond influxql.Expr) ([][]byte, error)
@@ -29,21 +33,55 @@ type RemoteNodeExecutor interface {
 }
 
 type remoteNodeExecutor struct {
-	MetaClient interface {
-		DataNode(nodeId uint64) (*meta.NodeInfo, error)
-	}
+	ClientPool         *ClientPool
 	DailTimeout        time.Duration
 	ShardReaderTimeout time.Duration
 	ClusterTracing     bool
+	Logger             *zap.Logger
+}
+
+func (me *remoteNodeExecutor) WithLogger(log *zap.Logger) {
+	me.Logger = log.With(zap.String("service", "RemoteNodeExecutor"))
+}
+
+func writeTestPacket(conn net.Conn) (err error) {
+	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	defer conn.SetDeadline(time.Time{})
+	typ := testRequestMessage
+	size := uint64(0)
+	if err = binary.Write(conn, binary.BigEndian, &typ); err != nil {
+		return
+	}
+	if err = binary.Write(conn, binary.BigEndian, &size); err != nil {
+		return
+	}
+	return
+}
+
+func getConnWithRetry(pool *ClientPool, nodeId uint64, logger *zap.Logger) (x.PooledConn, error) {
+	var (
+		conn x.PooledConn
+		err  error
+	)
+	retries := 3
+	for retries > 0 {
+		retries--
+		conn, err = pool.GetConn(nodeId)
+		if err != nil {
+			logger.Warn("Failed to get connection from pool", zap.Error(err))
+			return nil, ErrRetry
+		}
+		// do write test
+		if err = writeTestPacket(conn); err != nil {
+			logger.Warn("Failed to get connection from pool", zap.Error(err))
+			continue
+		}
+	}
+	return conn, err
 }
 
 func (me *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.Iterator, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.ShardReaderTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -63,11 +101,13 @@ func (me *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context,
 			Opt:         opt,
 			SpanContex:  spanCtx,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		// Read the response.
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != nil {
 			return err
@@ -90,12 +130,7 @@ func (me *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context,
 }
 
 func (me *remoteNodeExecutor) MapType(nodeId uint64, m *influxql.Measurement, field string, shardIds []uint64) (influxql.DataType, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return influxql.Unknown, err
 	}
@@ -113,10 +148,12 @@ func (me *remoteNodeExecutor) MapType(nodeId uint64, m *influxql.Measurement, fi
 			Field:    field,
 			ShardIDs: shardIds,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -131,12 +168,7 @@ func (me *remoteNodeExecutor) MapType(nodeId uint64, m *influxql.Measurement, fi
 }
 
 func (me *remoteNodeExecutor) IteratorCost(nodeId uint64, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.IteratorCost, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return query.IteratorCost{}, err
 	}
@@ -149,10 +181,12 @@ func (me *remoteNodeExecutor) IteratorCost(nodeId uint64, m *influxql.Measuremen
 			Opt:      opt,
 			ShardIDs: shardIds,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -167,12 +201,7 @@ func (me *remoteNodeExecutor) IteratorCost(nodeId uint64, m *influxql.Measuremen
 }
 
 func (me *remoteNodeExecutor) FieldDimensions(nodeId uint64, m *influxql.Measurement, shardIds []uint64) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -184,10 +213,12 @@ func (me *remoteNodeExecutor) FieldDimensions(nodeId uint64, m *influxql.Measure
 		req.ShardIDs = shardIds
 		req.Sources = influxql.Sources([]influxql.Source{m})
 		if err := EncodeTLV(conn, fieldDimensionsRequestMessage, &req); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != nil {
 			return resp.Err
@@ -202,12 +233,7 @@ func (me *remoteNodeExecutor) FieldDimensions(nodeId uint64, m *influxql.Measure
 }
 
 func (me *remoteNodeExecutor) TaskManagerStatement(nodeId uint64, stmt influxql.Statement) (*query.Result, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -219,10 +245,12 @@ func (me *remoteNodeExecutor) TaskManagerStatement(nodeId uint64, stmt influxql.
 		req.SetStatement(stmt.String())
 		req.SetDatabase("")
 		if err := EncodeTLV(conn, executeTaskManagerRequestMessage, &req); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -239,12 +267,7 @@ func (me *remoteNodeExecutor) TaskManagerStatement(nodeId uint64, stmt influxql.
 }
 
 func (me *remoteNodeExecutor) SeriesCardinality(nodeId uint64, database string) (int64, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return -1, err
 	}
@@ -255,11 +278,13 @@ func (me *remoteNodeExecutor) SeriesCardinality(nodeId uint64, database string) 
 		if err := EncodeTLV(conn, seriesCardinalityRequestMessage, &SeriesCardinalityRequest{
 			Database: database,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		var resp SeriesCardinalityResponse
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -275,12 +300,7 @@ func (me *remoteNodeExecutor) SeriesCardinality(nodeId uint64, database string) 
 }
 
 func (me *remoteNodeExecutor) MeasurementNames(nodeId uint64, database string, cond influxql.Expr) ([][]byte, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -292,11 +312,13 @@ func (me *remoteNodeExecutor) MeasurementNames(nodeId uint64, database string, c
 			Database: database,
 			Cond:     cond,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		var resp MeasurementNamesResponse
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -312,12 +334,7 @@ func (me *remoteNodeExecutor) MeasurementNames(nodeId uint64, database string, c
 }
 
 func (me *remoteNodeExecutor) TagValues(nodeId uint64, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagValues, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -331,11 +348,13 @@ func (me *remoteNodeExecutor) TagValues(nodeId uint64, shardIDs []uint64, cond i
 				Cond:     cond,
 			},
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		var resp TagValuesResponse
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -351,16 +370,10 @@ func (me *remoteNodeExecutor) TagValues(nodeId uint64, shardIDs []uint64, cond i
 }
 
 func (me *remoteNodeExecutor) TagKeys(nodeId uint64, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagKeys, error) {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return nil, err
 	}
-
 	defer conn.Close()
 
 	var tagKeys []tsdb.TagKeys
@@ -369,11 +382,13 @@ func (me *remoteNodeExecutor) TagKeys(nodeId uint64, shardIDs []uint64, cond inf
 			ShardIDs: shardIDs,
 			Cond:     cond,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		var resp TagKeysResponse
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -389,12 +404,7 @@ func (me *remoteNodeExecutor) TagKeys(nodeId uint64, shardIDs []uint64, cond inf
 }
 
 func (me *remoteNodeExecutor) DeleteMeasurement(nodeId uint64, database, name string) error {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return err
 	}
@@ -405,11 +415,13 @@ func (me *remoteNodeExecutor) DeleteMeasurement(nodeId uint64, database, name st
 			Database: database,
 			Name:     name,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		var resp DeleteMeasurementResponse
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -424,12 +436,7 @@ func (me *remoteNodeExecutor) DeleteMeasurement(nodeId uint64, database, name st
 }
 
 func (me *remoteNodeExecutor) DeleteDatabase(nodeId uint64, database string) error {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return err
 	}
@@ -439,11 +446,13 @@ func (me *remoteNodeExecutor) DeleteDatabase(nodeId uint64, database string) err
 		if err := EncodeTLV(conn, deleteDatabaseRequestMessage, &DeleteDatabaseRequest{
 			Database: database,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		var resp DeleteDatabaseResponse
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -458,12 +467,7 @@ func (me *remoteNodeExecutor) DeleteDatabase(nodeId uint64, database string) err
 }
 
 func (me *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string, sources []influxql.Source, cond influxql.Expr) error {
-	dialer := &NodeDialer{
-		MetaClient: me.MetaClient,
-		Timeout:    me.DailTimeout,
-	}
-
-	conn, err := dialer.DialNode(nodeId)
+	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
 	if err != nil {
 		return err
 	}
@@ -475,11 +479,13 @@ func (me *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string, sourc
 			Sources:  influxql.Sources(sources),
 			Cond:     cond,
 		}); err != nil {
+			conn.MarkUnusable()
 			return err
 		}
 
 		var resp DeleteSeriesResponse
 		if _, err := DecodeTLV(conn, &resp); err != nil {
+			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
 			return errors.New(resp.Err)
@@ -491,34 +497,4 @@ func (me *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string, sourc
 	}
 
 	return nil
-}
-
-// NodeDialer dials connections to a given node.
-type NodeDialer struct {
-	MetaClient interface {
-		DataNode(nodeId uint64) (*meta.NodeInfo, error)
-	}
-	Timeout time.Duration
-}
-
-// DialNode returns a connection to a node.
-func (d *NodeDialer) DialNode(nodeID uint64) (net.Conn, error) {
-	ni, err := d.MetaClient.DataNode(nodeID)
-	if err != nil {
-		return nil, err
-	}
-
-	conn, err := net.Dial("tcp", ni.TCPHost)
-	if err != nil {
-		return nil, err
-	}
-	conn.SetDeadline(time.Now().Add(d.Timeout))
-
-	// Write the cluster multiplexing header byte
-	if _, err := conn.Write([]byte{MuxHeader}); err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	return conn, nil
 }

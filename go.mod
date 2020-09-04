@@ -25,7 +25,6 @@ require (
 	github.com/klauspost/pgzip v1.2.1 // indirect
 	github.com/pkg/errors v0.8.1
 	github.com/pkg/profile v1.2.1 // indirect
-	github.com/spf13/cobra v0.0.3
 	github.com/stretchr/testify v1.5.1 // test
 	github.com/urfave/cli/v2 v2.2.0
 	github.com/xlab/treeprint v0.0.0-20181112141820-a009c3971eca // indirect

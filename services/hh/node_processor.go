@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/angopher/chronus/services/meta"
 	"github.com/influxdata/influxdb/models"
 	"golang.org/x/time/rate"
 )
@@ -298,7 +299,7 @@ func (n *NodeProcessor) Tail() string {
 // Active returns whether this node processor is for a currently active node.
 func (n *NodeProcessor) Active() (bool, error) {
 	nio, err := n.meta.DataNode(n.nodeID)
-	if err != nil {
+	if err != nil && err != meta.ErrNodeNotFound {
 		n.Logger.Printf("failed to determine if node %d is active: %s", n.nodeID, err.Error())
 		return false, err
 	}

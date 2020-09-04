@@ -25,6 +25,15 @@ import (
 	"github.com/influxdata/influxdb/services/meta"
 )
 
+// Service and remote executor are designed for "forwarded" requests
+//	between shards/nodes. For better performance we separate the design
+//	into several phases:
+//	1. Introduce connection pooling avoiding create/destroy connections frequently.
+//	2. Introduce multiplexing to reduce the cost of connections further more.
+//	But we should also notice that more than one connection are needed to avoid flow control of TCP.
+// Now we implement connection pooling first and keep an versioning api which enables
+//	data node declaring its running version.
+
 // MaxMessageSize defines how large a message can be before we reject it
 const MaxMessageSize = 1024 * 1024 * 1024 // 1GB
 
@@ -61,6 +70,12 @@ const (
 	mapTypeReq  = "mapTypeReq"
 	mapTypeFail = "mapTypeFail"
 )
+
+type ServerResponse interface {
+	SetCode(int)
+	SetMessage(string)
+	MarshalBinary() ([]byte, error)
+}
 
 // Service processes data received over raw TCP connections.
 type Service struct {
@@ -226,117 +241,137 @@ func (s *Service) Close() error {
 	return nil
 }
 
+func (s *Service) handle(conn net.Conn, typ byte, data []byte) (respType byte, resp encoding.BinaryMarshaler, err error) {
+	// Delegate message processing by type.
+	switch typ {
+	case writeShardRequestMessage:
+		err = s.processWriteShardRequest(data)
+		respType = writeShardResponseMessage
+		resp = &WriteShardResponse{}
+	case executeStatementRequestMessage:
+		err = s.processExecuteStatementRequest(data)
+		respType = writeShardResponseMessage
+		resp = &WriteShardResponse{}
+	case createIteratorRequestMessage:
+		s.processCreateIteratorRequest(conn, data)
+	case fieldDimensionsRequestMessage:
+		respType = fieldDimensionsResponseMessage
+		resp, err = s.processFieldDimensionsRequest(data)
+	case tagKeysRequestMessage:
+		respType = tagKeysResponseMessage
+		resp, err = s.processTagKeysRequest(data)
+	case tagValuesRequestMessage:
+		respType = tagValuesResponseMessage
+		resp, err = s.processTagValuesRequest(data)
+	case measurementNamesRequestMessage:
+		respType = measurementNamesResponseMessage
+		resp, err = s.processMeasurementNamesRequest(data)
+	case seriesCardinalityRequestMessage:
+		respType = seriesCardinalityResponseMessage
+		resp, err = s.processSeriesCardinalityRequest(data)
+	case deleteSeriesRequestMessage:
+		respType = deleteSeriesResponseMessage
+		resp, err = s.processDeleteSeriesRequest(data)
+	case deleteDatabaseRequestMessage:
+		respType = deleteDatabaseResponseMessage
+		resp, err = s.processDeleteDatabaseRequest(data)
+	case deleteMeasurementRequestMessage:
+		respType = deleteMeasurementResponseMessage
+		resp, err = s.processDeleteMeasurementRequest(data)
+	case iteratorCostRequestMessage:
+		respType = iteratorCostResponseMessage
+		resp, err = s.processIteratorCostRequest(data)
+	case mapTypeRequestMessage:
+		respType = mapTypeResponseMessage
+		resp, err = s.processMapTypeRequest(data)
+	case executeTaskManagerRequestMessage:
+		respType = executeTaskManagerResponseMessage
+		resp, err = s.processTaskManagerRequest(data)
+	case testRequestMessage:
+		// do nothing
+	default:
+		s.Logger.Error("cluster service message type not found", zap.Uint8("type", typ))
+	}
+	if err != nil {
+		s.Logger.Error("process request error", zap.Uint8("type", typ), zap.Error(err))
+	}
+	if resp == nil {
+		return
+	}
+	if serverResp, ok := resp.(ServerResponse); ok {
+		if err != nil {
+			serverResp.SetCode(1)
+			serverResp.SetMessage(err.Error())
+		} else {
+			serverResp.SetCode(0)
+		}
+	}
+	return
+}
+
+func (s *Service) writeClusterResponse(conn net.Conn, respType byte, resp encoding.BinaryMarshaler) (err error) {
+	// Marshal response to binary.
+	buf, err := resp.MarshalBinary()
+	if err != nil {
+		s.Logger.Error("error marshalling response", zap.Uint8("respType", respType), zap.Error(err))
+		return
+	}
+
+	// Write to connection.
+	if err = WriteTLV(conn, respType, buf); err != nil {
+		s.Logger.Error("WriteTLV fail", zap.Error(err))
+	}
+	return
+}
+
 // handleConn services an individual TCP connection.
 func (s *Service) handleConn(conn net.Conn) {
 	// Ensure connection is closed when service is closed.
-	closing := make(chan struct{})
-	defer close(closing)
-	go func() {
-		select {
-		case <-closing:
-		case <-s.closing:
-		}
-		conn.Close()
-	}()
-
-	s.Logger.Info(fmt.Sprintf("accept remote connection from %+v", conn.RemoteAddr()))
 	defer func() {
+		defer conn.Close()
 		s.Logger.Info(fmt.Sprintf("close remote connection from %+v", conn.RemoteAddr()))
 	}()
+	s.Logger.Info(fmt.Sprintf("accept remote connection from %+v", conn.RemoteAddr()))
 	for {
-		// Read type-length-value.
-		typ, err := ReadType(conn)
-		if err != nil {
-			if strings.HasSuffix(err.Error(), "EOF") {
-				return
-			}
-			s.Logger.Error("unable to read type", zap.Error(err))
-			return
-		}
-
-		// Delegate message processing by type.
-		switch typ {
-		case writeShardRequestMessage:
-			buf, err := ReadLV(conn)
-			if err != nil {
-				s.Logger.Error("unable to read length-value", zap.Error(err))
-				return
-			}
-
-			atomic.AddInt64(&s.stats.WriteShardReq, 1)
-			err = s.processWriteShardRequest(buf)
-			if err != nil {
-				s.Logger.Error("process write shard error", zap.Error(err))
-			}
-			s.writeShardResponse(conn, err)
-		case executeStatementRequestMessage:
-			buf, err := ReadLV(conn)
-			if err != nil {
-				s.Logger.Error("unable to read length-value", zap.Error(err))
-				return
-			}
-
-			err = s.processExecuteStatementRequest(buf)
-			if err != nil {
-				s.Logger.Error("process execute statement error", zap.Error(err))
-			}
-			s.writeShardResponse(conn, err)
-		case createIteratorRequestMessage:
-			atomic.AddInt64(&s.stats.CreateIteratorReq, 1)
-			s.processCreateIteratorRequest(conn)
-			return
-		case fieldDimensionsRequestMessage:
-			atomic.AddInt64(&s.stats.FieldDimensionsReq, 1)
-			s.processFieldDimensionsRequest(conn)
-			return
-		case tagKeysRequestMessage:
-			atomic.AddInt64(&s.stats.TagKeysReq, 1)
-			s.processTagKeysRequest(conn)
-		case tagValuesRequestMessage:
-			atomic.AddInt64(&s.stats.TagValuesReq, 1)
-			s.processTagValuesRequest(conn)
-			return
-		case measurementNamesRequestMessage:
-			atomic.AddInt64(&s.stats.MeasurementNamesReq, 1)
-			s.processMeasurementNamesRequest(conn)
-			return
-		case seriesCardinalityRequestMessage:
-			atomic.AddInt64(&s.stats.SeriesCardinalityReq, 1)
-			s.processSeriesCardinalityRequest(conn)
-			return
-		case deleteSeriesRequestMessage:
-			s.processDeleteSeriesRequest(conn)
-			return
-		case deleteDatabaseRequestMessage:
-			s.processDeleteDatabaseRequest(conn)
-			return
-		case deleteMeasurementRequestMessage:
-			s.processDeleteMeasurementRequest(conn)
-			return
-		case iteratorCostRequestMessage:
-			atomic.AddInt64(&s.stats.IteratorCostReq, 1)
-			s.processIteratorCostRequest(conn)
-			return
-		case mapTypeRequestMessage:
-			atomic.AddInt64(&s.stats.MapTypeReq, 1)
-			s.processMapTypeRequest(conn)
-			return
-		case executeTaskManagerRequestMessage:
-			s.processTaskManagerRequest(conn)
+		select {
+		case <-s.closing:
 			return
 		default:
-			s.Logger.Error("cluster service message type not found", zap.Uint8("type", typ))
+		}
+		now := time.Now()
+		conn.SetReadDeadline(now.Add(500 * time.Millisecond))
+		typ, data, err := ReadTLV(conn)
+		conn.SetDeadline(time.Time{})
+		if err == io.EOF {
+			return
+		}
+		if err, ok := err.(net.Error); ok && err.Timeout() {
+			continue
+		}
+		if err != nil {
+			s.Logger.Error("read error", zap.Error(err))
+			break
+		}
+		respType, resp, err := s.handle(conn, typ, data)
+		if resp == nil {
+			continue
+		}
+		err = s.writeClusterResponse(conn, respType, resp)
+		if err != nil {
+			// close conn due to error in writing
+			break
 		}
 	}
 }
 
-func (s *Service) processTaskManagerRequest(conn net.Conn) {
-	defer conn.Close()
-
-	var resp TaskManagerStatementResponse
-	if err := func() error {
+func (s *Service) processTaskManagerRequest(buf []byte) (*TaskManagerStatementResponse, error) {
+	var (
+		resp TaskManagerStatementResponse
+		err  error
+	)
+	if err = func() error {
 		var req TaskManagerStatementRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -356,21 +391,20 @@ func (s *Service) processTaskManagerRequest(conn net.Conn) {
 		resp.Result = *(<-recvCtx.Results)
 		return nil
 	}(); err != nil {
-		s.Logger.Error("s.processTaskManagerRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, executeTaskManagerResponseMessage, &resp); err != nil {
-		s.Logger.Error("s.processTaskManagerRequest EncodeTLV fail", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processMapTypeRequest(conn net.Conn) {
-	defer conn.Close()
-	var resp MapTypeResponse
-	if err := func() error {
+func (s *Service) processMapTypeRequest(buf []byte) (*MapTypeResponse, error) {
+	var (
+		resp MapTypeResponse
+		err  error
+	)
+	atomic.AddInt64(&s.stats.MapTypeReq, 1)
+	if err = func() error {
 		var req MapTypeRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -402,22 +436,20 @@ func (s *Service) processMapTypeRequest(conn net.Conn) {
 		return nil
 	}(); err != nil {
 		atomic.AddInt64(&s.stats.MapTypeFail, 1)
-		s.Logger.Error("processMapTypeRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, mapTypeResponseMessage, &resp); err != nil {
-		atomic.AddInt64(&s.stats.MapTypeFail, 1)
-		s.Logger.Error("processMapTypeRequest EncodeTLV fail", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processIteratorCostRequest(conn net.Conn) {
-	defer conn.Close()
-	var resp IteratorCostResponse
-	if err := func() error {
+func (s *Service) processIteratorCostRequest(buf []byte) (*IteratorCostResponse, error) {
+	var (
+		resp IteratorCostResponse
+		err  error
+	)
+	atomic.AddInt64(&s.stats.IteratorCostReq, 1)
+	if err = func() error {
 		var req IteratorCostRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -427,7 +459,6 @@ func (s *Service) processIteratorCostRequest(conn net.Conn) {
 		m := req.Sources[0].(*influxql.Measurement)
 		opt := req.Opt
 
-		var err error
 		sg := s.TSDBStore.ShardGroup(req.ShardIDs)
 		if m.Regex != nil {
 			resp.Cost, err = func() (query.IteratorCost, error) {
@@ -448,60 +479,53 @@ func (s *Service) processIteratorCostRequest(conn net.Conn) {
 		return err
 	}(); err != nil {
 		atomic.AddInt64(&s.stats.IteratorCostFail, 1)
-		s.Logger.Error("processIteratorCostRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, iteratorCostResponseMessage, &resp); err != nil {
-		atomic.AddInt64(&s.stats.IteratorCostFail, 1)
-		s.Logger.Error("processIteratorCostRequest EncodeTLV fail", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processDeleteMeasurementRequest(conn net.Conn) {
-	defer conn.Close()
-	var resp DeleteMeasurementResponse
-	if err := func() error {
+func (s *Service) processDeleteMeasurementRequest(buf []byte) (*DeleteMeasurementResponse, error) {
+	var (
+		resp DeleteMeasurementResponse
+		err  error
+	)
+	if err = func() error {
 		var req DeleteMeasurementRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 		return s.TSDBStore.DeleteMeasurement(req.Database, req.Name)
 	}(); err != nil {
-		s.Logger.Error("processDeleteMeasurementRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, deleteMeasurementResponseMessage, &resp); err != nil {
-		s.Logger.Error("processDeleteMeasurementRequest EncodeTLV fail", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processDeleteDatabaseRequest(conn net.Conn) {
-	defer conn.Close()
-	var resp DeleteDatabaseResponse
-	if err := func() error {
+func (s *Service) processDeleteDatabaseRequest(buf []byte) (*DeleteDatabaseResponse, error) {
+	var (
+		resp DeleteDatabaseResponse
+		err  error
+	)
+	if err = func() error {
 		var req DeleteDatabaseRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 		return s.TSDBStore.DeleteDatabase(req.Database)
 	}(); err != nil {
-		s.Logger.Error("processDeleteDatabaseRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, deleteDatabaseResponseMessage, &resp); err != nil {
-		s.Logger.Error("processDeleteDatabaseRequest EncodeTLV", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processDeleteSeriesRequest(conn net.Conn) {
-	defer conn.Close()
-	var resp DeleteSeriesResponse
-	if err := func() error {
+func (s *Service) processDeleteSeriesRequest(buf []byte) (*DeleteSeriesResponse, error) {
+	var (
+		resp DeleteSeriesResponse
+		err  error
+	)
+	if err = func() error {
 		var req DeleteSeriesRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -509,21 +533,20 @@ func (s *Service) processDeleteSeriesRequest(conn net.Conn) {
 		err := s.TSDBStore.DeleteSeries(req.Database, req.Sources, cond)
 		return err
 	}(); err != nil {
-		s.Logger.Error("processDeleteSeriesRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, deleteSeriesResponseMessage, &resp); err != nil {
-		s.Logger.Error("processDeleteSeriesRequest EncodeTLV fail", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processSeriesCardinalityRequest(conn net.Conn) {
-	defer conn.Close()
-	var resp SeriesCardinalityResponse
-	if err := func() error {
+func (s *Service) processSeriesCardinalityRequest(buf []byte) (*SeriesCardinalityResponse, error) {
+	var (
+		resp SeriesCardinalityResponse
+		err  error
+	)
+	atomic.AddInt64(&s.stats.SeriesCardinalityReq, 1)
+	if err = func() error {
 		var req SeriesCardinalityRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -532,23 +555,19 @@ func (s *Service) processSeriesCardinalityRequest(conn net.Conn) {
 		return err
 	}(); err != nil {
 		atomic.AddInt64(&s.stats.SeriesCardinalityFail, 1)
-		s.Logger.Error("processSeriesCardinalityRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, seriesCardinalityResponseMessage, &resp); err != nil {
-		atomic.AddInt64(&s.stats.SeriesCardinalityFail, 1)
-		s.Logger.Error("processSeriesCardinalityRequest EncodeTLV", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processMeasurementNamesRequest(conn net.Conn) {
-	defer conn.Close()
-
-	var resp MeasurementNamesResponse
-	if err := func() error {
+func (s *Service) processMeasurementNamesRequest(buf []byte) (*MeasurementNamesResponse, error) {
+	var (
+		resp MeasurementNamesResponse
+		err  error
+	)
+	if err = func() error {
 		var req MeasurementNamesRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -556,24 +575,21 @@ func (s *Service) processMeasurementNamesRequest(conn net.Conn) {
 		resp.Names, err = s.TSDBStore.MeasurementNames(nil, req.Database, req.Cond)
 		return err
 	}(); err != nil {
-		s.Logger.Error("processMeasurementNamesRequest fail", zap.Error(err))
 		atomic.AddInt64(&s.stats.MeasurementNamesFail, 1)
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, measurementNamesResponseMessage, &resp); err != nil {
-		atomic.AddInt64(&s.stats.MeasurementNamesFail, 1)
-		s.Logger.Error("processMeasurementNamesRequest EncodeTLV fail", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processTagKeysRequest(conn net.Conn) {
-	defer conn.Close()
-
-	var resp TagKeysResponse
-	if err := func() error {
+func (s *Service) processTagKeysRequest(buf []byte) (*TagKeysResponse, error) {
+	var (
+		resp TagKeysResponse
+		err  error
+	)
+	atomic.AddInt64(&s.stats.TagKeysReq, 1)
+	if err = func() error {
 		var req TagKeysRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -582,23 +598,20 @@ func (s *Service) processTagKeysRequest(conn net.Conn) {
 		return err
 	}(); err != nil {
 		atomic.AddInt64(&s.stats.TagKeysFail, 1)
-		s.Logger.Error("processTagKeysRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, tagKeysResponseMessage, &resp); err != nil {
-		atomic.AddInt64(&s.stats.TagKeysFail, 1)
-		s.Logger.Error("processTagKeysRequest EncodeTLV", zap.Error(err))
-	}
+	return &resp, err
 }
 
-func (s *Service) processTagValuesRequest(conn net.Conn) {
-	defer conn.Close()
-
-	var resp TagValuesResponse
-	if err := func() error {
+func (s *Service) processTagValuesRequest(buf []byte) (*TagValuesResponse, error) {
+	var (
+		resp TagValuesResponse
+		err  error
+	)
+	atomic.AddInt64(&s.stats.TagValuesReq, 1)
+	if err = func() error {
 		var req TagValuesRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -607,14 +620,9 @@ func (s *Service) processTagValuesRequest(conn net.Conn) {
 		return err
 	}(); err != nil {
 		atomic.AddInt64(&s.stats.TagValuesFail, 1)
-		s.Logger.Error("processTagValuesRequest fail", zap.Error(err))
 		resp.Err = err.Error()
 	}
-
-	if err := EncodeTLV(conn, tagValuesResponseMessage, &resp); err != nil {
-		atomic.AddInt64(&s.stats.TagValuesFail, 1)
-		s.Logger.Error("processTagValuesRequest EncodeTLV fail", zap.Error(err))
-	}
+	return &resp, err
 }
 
 func (s *Service) processExecuteStatementRequest(buf []byte) error {
@@ -656,6 +664,8 @@ func (s *Service) processWriteShardRequest(buf []byte) error {
 	}
 
 	points := req.Points()
+	// stats
+	atomic.AddInt64(&s.stats.WriteShardReq, 1)
 	atomic.AddInt64(&s.stats.WriteShardPointsReq, int64(len(points)))
 	err := s.TSDBStore.WriteToShard(req.ShardID(), points)
 
@@ -693,39 +703,21 @@ func (s *Service) processWriteShardRequest(buf []byte) error {
 	return nil
 }
 
-func (s *Service) writeShardResponse(w io.Writer, e error) {
-	// Build response.
-	var resp WriteShardResponse
-	if e != nil {
-		resp.SetCode(1)
-		resp.SetMessage(e.Error())
-	} else {
-		resp.SetCode(0)
-	}
-
-	// Marshal response to binary.
-	buf, err := resp.MarshalBinary()
-	if err != nil {
-		s.Logger.Error("error marshalling shard response", zap.Error(err))
-		return
-	}
-
-	// Write to connection.
-	if err := WriteTLV(w, writeShardResponseMessage, buf); err != nil {
-		s.Logger.Error("write shard WriteTLV fail", zap.Error(err))
-	}
-}
-
-func (s *Service) processCreateIteratorRequest(conn net.Conn) {
-	defer conn.Close()
-
+func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) {
 	var itr query.Iterator
 	var trace *tracing.Trace
 	var span *tracing.Span
+	ioError := false
+	defer func() {
+		if ioError {
+			conn.Close()
+		}
+	}()
+	respType := createIteratorResponseMessage
 	if err := func() error {
 		// Parse request.
 		var req CreateIteratorRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -782,8 +774,9 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn) {
 			itr.Close()
 		}
 		s.Logger.Error("error reading CreateIterator request fail", zap.Error(err))
-		if err = EncodeTLV(conn, createIteratorResponseMessage, &CreateIteratorResponse{Err: err}); err != nil {
+		if err = EncodeTLV(conn, respType, &CreateIteratorResponse{Err: err}); err != nil {
 			s.Logger.Error("CreateIteratorRequest EncodeTLV fail", zap.Error(err))
+			ioError = true
 		}
 		return
 	}
@@ -805,11 +798,14 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn) {
 		seriesN = itr.Stats().SeriesN
 	}
 	// Encode success response.
-	if err := EncodeTLV(conn, createIteratorResponseMessage, &CreateIteratorResponse{DataType: dataType, SeriesN: seriesN}); err != nil {
+	if err := EncodeTLV(conn, respType, &CreateIteratorResponse{DataType: dataType, SeriesN: seriesN}); err != nil {
 		s.Logger.Error("error writing CreateIterator response, EncodeTLV fail", zap.Error(err))
 		atomic.AddInt64(&s.stats.CreateIteratorFail, 1)
+		ioError = true
 		return
 	}
+	//XXX
+	ioError = true
 
 	// Exit if no iterator was produced.
 	if itr == nil {
@@ -820,6 +816,7 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn) {
 	if err := query.NewIteratorEncoder(conn).EncodeIterator(itr); err != nil {
 		s.Logger.Error("encoding CreateIterator iterator fail", zap.Error(err))
 		atomic.AddInt64(&s.stats.CreateIteratorFail, 1)
+		ioError = true
 		return
 	}
 
@@ -830,18 +827,23 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn) {
 		if err := query.NewIteratorEncoder(conn).EncodeTrace(trace); err != nil {
 			s.Logger.Error("EncodeTrace fail", zap.Error(err))
 			atomic.AddInt64(&s.stats.CreateIteratorFail, 1)
+			ioError = true
 			return
 		}
 	}
 }
 
-func (s *Service) processFieldDimensionsRequest(conn net.Conn) {
+func (s *Service) processFieldDimensionsRequest(buf []byte) (*FieldDimensionsResponse, error) {
+	var (
+		err error
+	)
 	var fields map[string]influxql.DataType
 	var dimensions map[string]struct{}
-	if err := func() error {
+	atomic.AddInt64(&s.stats.FieldDimensionsReq, 1)
+	if err = func() error {
 		// Parse request.
 		var req FieldDimensionsRequest
-		if err := DecodeLV(conn, &req); err != nil {
+		if err := req.UnmarshalBinary(buf); err != nil {
 			return err
 		}
 
@@ -865,20 +867,12 @@ func (s *Service) processFieldDimensionsRequest(conn net.Conn) {
 		return nil
 	}(); err != nil {
 		atomic.AddInt64(&s.stats.FieldDimensionsFail, 1)
-		s.Logger.Error("error reading FieldDimensions request", zap.Error(err))
-		EncodeTLV(conn, fieldDimensionsResponseMessage, &FieldDimensionsResponse{Err: err})
-		return
+		return &FieldDimensionsResponse{Err: err}, err
 	}
-
-	// Encode success response.
-	if err := EncodeTLV(conn, fieldDimensionsResponseMessage, &FieldDimensionsResponse{
+	return &FieldDimensionsResponse{
 		Fields:     fields,
 		Dimensions: dimensions,
-	}); err != nil {
-		atomic.AddInt64(&s.stats.FieldDimensionsFail, 1)
-		s.Logger.Error("error writing FieldDimensions response", zap.Error(err))
-		return
-	}
+	}, err
 }
 
 // ReadTLV reads a type-length-value record from r.
@@ -899,7 +893,7 @@ func ReadTLV(r io.Reader) (byte, []byte, error) {
 func ReadType(r io.Reader) (byte, error) {
 	var typ [1]byte
 	if _, err := io.ReadFull(r, typ[:]); err != nil {
-		return 0, fmt.Errorf("read message type: %s", err)
+		return 0, err
 	}
 	return typ[0], nil
 }
@@ -909,17 +903,22 @@ func ReadLV(r io.Reader) ([]byte, error) {
 	// Read the size of the message.
 	var sz int64
 	if err := binary.Read(r, binary.BigEndian, &sz); err != nil {
-		return nil, fmt.Errorf("read message size: %s", err)
+		return nil, err
 	}
 
 	if sz >= MaxMessageSize {
 		return nil, fmt.Errorf("max message size of %d exceeded: %d", MaxMessageSize, sz)
 	}
 
+	if sz == 0 {
+		// empty msg
+		return []byte{}, nil
+	}
+
 	// Read the value.
 	buf := make([]byte, sz)
 	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, fmt.Errorf("read message value: %s", err)
+		return nil, err
 	}
 
 	return buf, nil
@@ -939,7 +938,7 @@ func WriteTLV(w io.Writer, typ byte, buf []byte) error {
 // WriteType writes the type in a TLV record to w.
 func WriteType(w io.Writer, typ byte) error {
 	if _, err := w.Write([]byte{typ}); err != nil {
-		return fmt.Errorf("write message type: %s", err)
+		return err
 	}
 	return nil
 }
@@ -948,12 +947,12 @@ func WriteType(w io.Writer, typ byte) error {
 func WriteLV(w io.Writer, buf []byte) error {
 	// Write the size of the message.
 	if err := binary.Write(w, binary.BigEndian, int64(len(buf))); err != nil {
-		return fmt.Errorf("write message size: %s", err)
+		return err
 	}
 
 	// Write the value.
 	if _, err := w.Write(buf); err != nil {
-		return fmt.Errorf("write message value: %s", err)
+		return err
 	}
 	return nil
 }

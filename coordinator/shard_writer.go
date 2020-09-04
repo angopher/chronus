@@ -2,11 +2,11 @@ package coordinator
 
 import (
 	"fmt"
-	"net"
 	"time"
 
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/services/meta"
+	"go.uber.org/zap"
 )
 
 const (
@@ -54,13 +54,15 @@ const (
 
 	executeTaskManagerRequestMessage
 	executeTaskManagerResponseMessage
+
+	testRequestMessage // one way message
 )
 
 // ShardWriter writes a set of points to a shard.
 type ShardWriter struct {
-	pool           *clientPool
-	timeout        time.Duration
-	maxConnections int
+	pool    *ClientPool
+	timeout time.Duration
+	logger  *zap.Logger
 
 	MetaClient interface {
 		DataNode(id uint64) (ni *meta.NodeInfo, err error)
@@ -69,28 +71,25 @@ type ShardWriter struct {
 }
 
 // NewShardWriter returns a new instance of ShardWriter.
-func NewShardWriter(timeout time.Duration, maxConnections int) *ShardWriter {
+func NewShardWriter(timeout time.Duration, pool *ClientPool) *ShardWriter {
 	return &ShardWriter{
-		pool:           newClientPool(),
-		timeout:        timeout,
-		maxConnections: maxConnections,
+		pool:    pool,
+		timeout: timeout,
+		logger:  zap.NewNop(),
 	}
+}
+
+func (w *ShardWriter) WithLogger(logger *zap.Logger) {
+	w.logger = logger.With(zap.String("service", "ShardWriter"))
 }
 
 // WriteShard writes time series points to a shard
 func (w *ShardWriter) WriteShard(shardID, ownerID uint64, points []models.Point) error {
-	c, err := w.dial(ownerID)
+	conn, err := getConnWithRetry(w.pool, ownerID, w.logger)
 	if err != nil {
 		return err
 	}
-
-	conn, ok := c.(*pooledConn)
-	if !ok {
-		panic("wrong connection type")
-	}
-	defer func(conn net.Conn) {
-		conn.Close() // return to pool
-	}(conn)
+	defer conn.Close()
 
 	// Determine the location of this shard and whether it still exists
 	db, rp, sgi := w.MetaClient.ShardOwner(shardID)
@@ -128,6 +127,7 @@ func (w *ShardWriter) WriteShard(shardID, ownerID uint64, points []models.Point)
 		conn.MarkUnusable()
 		return err
 	}
+	conn.SetDeadline(time.Time{})
 
 	// Unmarshal response.
 	var response WriteShardResponse
@@ -142,22 +142,6 @@ func (w *ShardWriter) WriteShard(shardID, ownerID uint64, points []models.Point)
 	return nil
 }
 
-func (w *ShardWriter) dial(nodeID uint64) (net.Conn, error) {
-	// If we don't have a connection pool for that addr yet, create one
-	_, ok := w.pool.getPool(nodeID)
-	if !ok {
-		factory := &connFactory{nodeID: nodeID, clientPool: w.pool, timeout: w.timeout}
-		factory.metaClient = w.MetaClient
-
-		p, err := NewBoundedPool(1, w.maxConnections, w.timeout, factory.dial)
-		if err != nil {
-			return nil, err
-		}
-		w.pool.setPool(nodeID, p)
-	}
-	return w.pool.conn(nodeID)
-}
-
 // Close closes ShardWriter's pool
 func (w *ShardWriter) Close() error {
 	if w.pool == nil {
@@ -166,53 +150,4 @@ func (w *ShardWriter) Close() error {
 	w.pool.close()
 	w.pool = nil
 	return nil
-}
-
-const (
-	maxConnections = 500
-	maxRetries     = 3
-)
-
-var errMaxConnectionsExceeded = fmt.Errorf("can not exceed max connections of %d", maxConnections)
-
-type connFactory struct {
-	nodeID  uint64
-	timeout time.Duration
-
-	clientPool interface {
-		size() int
-	}
-
-	metaClient interface {
-		DataNode(id uint64) (ni *meta.NodeInfo, err error)
-	}
-}
-
-func (c *connFactory) dial() (net.Conn, error) {
-	if c.clientPool.size() > maxConnections {
-		return nil, errMaxConnectionsExceeded
-	}
-
-	ni, err := c.metaClient.DataNode(c.nodeID)
-	if err != nil {
-		return nil, err
-	}
-
-	if ni == nil {
-		return nil, fmt.Errorf("node %d does not exist", c.nodeID)
-	}
-
-	conn, err := net.DialTimeout("tcp", ni.TCPHost, c.timeout)
-	if err != nil {
-		return nil, err
-	}
-
-	// Write a marker byte for cluster messages.
-	_, err = conn.Write([]byte{MuxHeader})
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-
-	return conn, nil
 }

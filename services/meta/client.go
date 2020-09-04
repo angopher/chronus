@@ -130,6 +130,7 @@ func (c *Client) data() *Data {
 }
 
 // DataNode returns a node by id.
+//	If specified node doesn't exist a meta.ErrNodeNotFound error will be returned.
 func (c *Client) DataNode(id uint64) (*meta.NodeInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

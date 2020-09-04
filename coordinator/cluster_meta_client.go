@@ -57,21 +57,18 @@ func (me *ClusterMetaClient) ClusterID() uint64 {
 }
 
 func (me *ClusterMetaClient) syncData() error {
-	fmt.Println("start sync data")
+	me.Logger.Info("start sync data")
 	data, err := me.metaCli.Data()
 	if err != nil {
 		fmt.Println("start sync fail ", err)
 		return err
 	}
 
-	fmt.Println("start sync done")
+	me.Logger.Info("start sync done")
 	return me.cache.ReplaceData(data)
 }
 
-func (me *ClusterMetaClient) RunSyncLoop() {
-	//sync data first and will signal changes
-	me.syncData()
-
+func (me *ClusterMetaClient) syncLoop() {
 	ticker := time.NewTicker(time.Duration(me.pingIntervalMs) * time.Millisecond)
 	printLimiter := rate.NewLimiter(0.1, 1)
 	for {
@@ -99,6 +96,20 @@ func (me *ClusterMetaClient) RunSyncLoop() {
 				}
 			}
 		}
+	}
+}
+
+func (me *ClusterMetaClient) Start() {
+	wait := me.WaitForDataChanged()
+	//sync data first and will signal changes
+	me.syncData()
+	go me.syncLoop()
+	//wait sync meta data from meta server
+	select {
+	case <-time.After(5 * time.Second):
+		//TODO:
+		panic("sync meta data failed")
+	case <-wait:
 	}
 }
 
@@ -152,6 +163,7 @@ func (me *ClusterMetaClient) CreateDataNode(httpAddr, tcpAddr string) (*meta.Nod
 	return me.cache.CreateDataNode(httpAddr, tcpAddr)
 }
 
+// DataNode returns the node information according to the id, if it's not existed a meta.ErrNodeNotFound is returned.
 func (me *ClusterMetaClient) DataNode(id uint64) (*meta.NodeInfo, error) {
 	return me.cache.DataNode(id)
 }

@@ -3,6 +3,7 @@ package controller
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -21,7 +22,8 @@ import (
 
 const (
 	// MuxHeader is the header byte used for the TCP muxer.
-	MuxHeader = 4
+	MuxHeader   = 4
+	MILLISECOND = 1e6
 )
 
 type Service struct {
@@ -35,6 +37,7 @@ type Service struct {
 		DataNodeByTCPHost(addr string) (*meta.NodeInfo, error)
 		RemoveShardOwner(shardID, nodeID uint64) error
 		DataNodes() ([]meta.NodeInfo, error)
+		RetentionPolicy(database, name string) (*meta.RetentionPolicyInfo, error)
 
 		ShardOwner(shardID uint64) (database, policy string, sgi *meta.ShardGroupInfo)
 		AddShardOwner(shardID, nodeID uint64) error
@@ -145,20 +148,20 @@ func (s *Service) handleConn(conn net.Conn) error {
 	case RequestShowDataNodes:
 		nodes, err := s.handleShowDataNodes()
 		s.showDataNodesResponse(conn, nodes, err)
+	case RequestShards:
+		groupInfo, err := s.handleShards(conn)
+		s.shardsResponse(conn, groupInfo, err)
+	case RequestShard:
+		db, rp, info, err := s.handleShard(conn)
+		s.shardResponse(conn, db, rp, info, err)
 	}
 
 	return nil
 }
 
 func (s *Service) handleTruncateShard(conn net.Conn) error {
-	buf, err := coordinator.ReadLV(conn)
-	if err != nil {
-		s.Logger.Error("unable to read length-value", zap.Error(err))
-		return err
-	}
-
 	var req TruncateShardRequest
-	if err := json.Unmarshal(buf, &req); err != nil {
+	if err := s.readRequest(conn, &req); err != nil {
 		return err
 	}
 
@@ -194,14 +197,8 @@ func (s *Service) truncateShardResponse(w io.Writer, e error) {
 }
 
 func (s *Service) handleCopyShard(conn net.Conn) error {
-	buf, err := coordinator.ReadLV(conn)
-	if err != nil {
-		s.Logger.Error("unable to read length-value", zap.Error(err))
-		return err
-	}
-
 	var req CopyShardRequest
-	if err := json.Unmarshal(buf, &req); err != nil {
+	if err := s.readRequest(conn, &req); err != nil {
 		return err
 	}
 
@@ -243,6 +240,33 @@ func toCopyTask(t *migrate.Task) CopyShardTask {
 	return task
 }
 
+func (s *Service) writeResponse(w io.Writer, t ResponseType, obj interface{}) {
+	// Marshal response to binary.
+	buf, err := json.Marshal(obj)
+	if err != nil {
+		s.Logger.Error(fmt.Sprint("Marshal fail: type=", t, ", error=", err.Error()))
+		return
+	}
+
+	// Write to connection.
+	if err := coordinator.WriteTLV(w, byte(t), buf); err != nil {
+		s.Logger.Error(fmt.Sprint("WriteTLV fail: type=", t, ", error=", err.Error()))
+	}
+}
+
+func (s *Service) readRequest(conn net.Conn, obj interface{}) error {
+	buf, err := coordinator.ReadLV(conn)
+	if err != nil {
+		s.Logger.Error("unable to read length-value", zap.Error(err))
+		return err
+	}
+
+	if err := json.Unmarshal(buf, obj); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Service) handleCopyShardStatus(conn net.Conn) []CopyShardTask {
 	tasks := s.migrateManager.Tasks()
 	result := make([]CopyShardTask, len(tasks))
@@ -258,29 +282,12 @@ func (s *Service) copyShardStatusResponse(w io.Writer, tasks []CopyShardTask) {
 	resp.Code = 0
 	resp.Msg = "ok"
 	resp.Tasks = tasks
-
-	// Marshal response to binary.
-	buf, err := json.Marshal(&resp)
-	if err != nil {
-		s.Logger.Error("error marshalling show copy shard response", zap.Error(err))
-		return
-	}
-
-	// Write to connection.
-	if err := coordinator.WriteTLV(w, byte(ResponseCopyShardStatus), buf); err != nil {
-		s.Logger.Error("show copy shard WriteTLV fail", zap.Error(err))
-	}
+	s.writeResponse(w, ResponseCopyShardStatus, &resp)
 }
 
 func (s *Service) handleKillCopyShard(conn net.Conn) error {
-	buf, err := coordinator.ReadLV(conn)
-	if err != nil {
-		s.Logger.Error("unable to read length-value", zap.Error(err))
-		return err
-	}
-
 	var req KillCopyShardRequest
-	if err := json.Unmarshal(buf, &req); err != nil {
+	if err := s.readRequest(conn, &req); err != nil {
 		return err
 	}
 
@@ -291,38 +298,14 @@ func (s *Service) handleKillCopyShard(conn net.Conn) error {
 func (s *Service) killCopyShardResponse(w io.Writer, e error) {
 	// Build response.
 	var resp KillCopyShardResponse
-	if e != nil {
-		resp.Code = 1
-		resp.Msg = e.Error()
-	} else {
-		resp.Code = 0
-		resp.Msg = "ok"
-	}
-
-	// Marshal response to binary.
-	buf, err := json.Marshal(&resp)
-	if err != nil {
-		s.Logger.Error("error marshalling show copy shard response", zap.Error(err))
-		return
-	}
-
-	// Write to connection.
-	if err := coordinator.WriteTLV(w, byte(ResponseKillCopyShard), buf); err != nil {
-		s.Logger.Error("kill copy shard WriteTLV fail", zap.Error(err))
-	}
+	setError(&resp.CommonResp, e)
+	s.writeResponse(w, ResponseKillCopyShard, &resp)
 }
 
 func (s *Service) handleRemoveShard(conn net.Conn) error {
 	s.Logger.Info("handleRemoveShard")
-	buf, err := coordinator.ReadLV(conn)
-	if err != nil {
-		s.Logger.Error("unable to read length-value", zap.Error(err))
-		return err
-	}
-
 	var req RemoveShardRequest
-	if err := json.Unmarshal(buf, &req); err != nil {
-		s.Logger.Error("unmarshal fail.", zap.Error(err))
+	if err := s.readRequest(conn, &req); err != nil {
 		return err
 	}
 
@@ -353,36 +336,13 @@ func (s *Service) handleRemoveShard(conn net.Conn) error {
 func (s *Service) removeShardResponse(w io.Writer, e error) {
 	// Build response.
 	var resp RemoveShardResponse
-	if e != nil {
-		resp.Code = 1
-		resp.Msg = e.Error()
-	} else {
-		resp.Code = 0
-		resp.Msg = "ok"
-	}
-
-	// Marshal response to binary.
-	buf, err := json.Marshal(&resp)
-	if err != nil {
-		s.Logger.Error("error marshalling remove shard response", zap.Error(err))
-		return
-	}
-
-	// Write to connection.
-	if err := coordinator.WriteTLV(w, byte(ResponseRemoveShard), buf); err != nil {
-		s.Logger.Error("remove shard WriteTLV fail", zap.Error(err))
-	}
+	setError(&resp.CommonResp, e)
+	s.writeResponse(w, ResponseRemoveShard, &resp)
 }
 
 func (s *Service) handleRemoveDataNode(conn net.Conn) error {
-	buf, err := coordinator.ReadLV(conn)
-	if err != nil {
-		s.Logger.Error("unable to read length-value", zap.Error(err))
-		return err
-	}
-
 	var req RemoveDataNodeRequest
-	if err := json.Unmarshal(buf, &req); err != nil {
+	if err := s.readRequest(conn, &req); err != nil {
 		return err
 	}
 
@@ -399,25 +359,88 @@ func (s *Service) handleRemoveDataNode(conn net.Conn) error {
 func (s *Service) removeDataNodeResponse(w io.Writer, e error) {
 	// Build response.
 	var resp RemoveDataNodeResponse
+	setError(&resp.CommonResp, e)
+	s.writeResponse(w, ResponseRemoveDataNode, &resp)
+}
+
+func (s *Service) handleShards(conn net.Conn) (*meta.RetentionPolicyInfo, error) {
+	var req GetShardsRequest
+	if err := s.readRequest(conn, &req); err != nil {
+		return nil, err
+	}
+	if req.Database == "" || req.RetentionPolicy == "" {
+		return nil, errors.New("Both database and retention policy should be specified")
+	}
+	return s.MetaClient.RetentionPolicy(req.Database, req.RetentionPolicy)
+}
+
+func fromMetaOwners(owners []meta.ShardOwner) []uint64 {
+	nodes := make([]uint64, len(owners))
+	for i, owner := range owners {
+		nodes[i] = owner.NodeID
+	}
+	return nodes
+}
+
+func fromMetaShards(shards []meta.ShardInfo) []Shard {
+	list := make([]Shard, len(shards))
+	for i, shard := range shards {
+		list[i].ID = shard.ID
+		list[i].Nodes = fromMetaOwners(shard.Owners)
+	}
+	return list
+}
+
+func (s *Service) shardsResponse(w io.Writer, rp *meta.RetentionPolicyInfo, e error) {
+	// Build response.
+	var resp ShardsResponse
+	setError(&resp.CommonResp, e)
+	if rp != nil {
+		resp.Rp = rp.Name
+		resp.Duration = int64(rp.Duration / time.Millisecond)
+		resp.GroupDuration = int64(rp.ShardGroupDuration / time.Millisecond)
+		resp.Replica = rp.ReplicaN
+		resp.Groups = make([]ShardGroup, len(rp.ShardGroups))
+		for i, g := range rp.ShardGroups {
+			resp.Groups[i].ID = g.ID
+			resp.Groups[i].StartTime = g.StartTime.UnixNano() / MILLISECOND
+			resp.Groups[i].EndTime = g.EndTime.UnixNano() / MILLISECOND
+			resp.Groups[i].DeletedAt = g.DeletedAt.UnixNano() / MILLISECOND
+			resp.Groups[i].TruncatedAt = g.TruncatedAt.UnixNano() / MILLISECOND
+			resp.Groups[i].Shards = fromMetaShards(g.Shards)
+		}
+	}
+
+	s.writeResponse(w, ResponseShards, &resp)
+}
+
+func (s *Service) handleShard(conn net.Conn) (string, string, *meta.ShardInfo, error) {
+	var req GetShardRequest
+	if err := s.readRequest(conn, &req); err != nil {
+		return "", "", nil, err
+	}
+	if req.ShardID < 1 {
+		return "", "", nil, errors.New("ShardID should be specified")
+	}
+	db, rp, groupInfo := s.MetaClient.ShardOwner(req.ShardID)
+	for _, shard := range groupInfo.Shards {
+		if shard.ID == req.ShardID {
+			return db, rp, &shard, nil
+		}
+	}
+	return "", "", nil, errors.New("Specified shard could not be found")
+}
+
+func (s *Service) shardResponse(w io.Writer, db, rp string, shard *meta.ShardInfo, e error) {
+	var resp ShardResponse
+	setError(&resp.CommonResp, e)
 	if e != nil {
-		resp.Code = 1
-		resp.Msg = e.Error()
-	} else {
-		resp.Code = 0
-		resp.Msg = "ok"
+		resp.ID = shard.ID
+		resp.DB = db
+		resp.Rp = rp
+		resp.Nodes = fromMetaOwners(shard.Owners)
 	}
-
-	// Marshal response to binary.
-	buf, err := json.Marshal(&resp)
-	if err != nil {
-		s.Logger.Error("error marshalling remove data node response", zap.Error(err))
-		return
-	}
-
-	// Write to connection.
-	if err := coordinator.WriteTLV(w, byte(ResponseRemoveDataNode), buf); err != nil {
-		s.Logger.Error("remove data node WriteTLV fail", zap.Error(err))
-	}
+	s.writeResponse(w, ResponseShard, &resp)
 }
 
 func (s *Service) handleShowDataNodes() ([]DataNode, error) {
@@ -436,25 +459,18 @@ func (s *Service) handleShowDataNodes() ([]DataNode, error) {
 func (s *Service) showDataNodesResponse(w io.Writer, nodes []DataNode, e error) {
 	// Build response.
 	var resp ShowDataNodesResponse
-	if e != nil {
+	setError(&resp.CommonResp, e)
+	resp.DataNodes = nodes
+	s.writeResponse(w, ResponseShowDataNodes, &resp)
+}
+
+func setError(resp *CommonResp, err error) {
+	if err != nil {
 		resp.Code = 1
-		resp.Msg = e.Error()
+		resp.Msg = err.Error()
 	} else {
 		resp.Code = 0
 		resp.Msg = "ok"
-	}
-	resp.DataNodes = nodes
-
-	// Marshal response to binary.
-	buf, err := json.Marshal(&resp)
-	if err != nil {
-		s.Logger.Error("error marshalling show data nodes response", zap.Error(err))
-		return
-	}
-
-	// Write to connection.
-	if err := coordinator.WriteTLV(w, byte(ResponseShowDataNodes), buf); err != nil {
-		s.Logger.Error("show data nodes WriteTLV fail", zap.Error(err))
 	}
 }
 
@@ -505,6 +521,14 @@ type KillCopyShardResponse struct {
 	CommonResp
 }
 
+type GetShardsRequest struct {
+	Database, RetentionPolicy string
+}
+
+type GetShardRequest struct {
+	ShardID uint64
+}
+
 type RemoveShardRequest struct {
 	DataNodeAddr string `json:"data_node_addr"`
 	ShardID      uint64 `json:"shard_id"`
@@ -528,6 +552,37 @@ type DataNode struct {
 	HttpAddr string `json:"http_addr"`
 }
 
+type ShardGroup struct {
+	ID          uint64  `json:"id"`
+	StartTime   int64   `json:"begin"`
+	EndTime     int64   `json:"end"`
+	DeletedAt   int64   `json:"deleted_at"`
+	TruncatedAt int64   `json:"truncated_at"`
+	Shards      []Shard `json:"shards"`
+}
+
+type Shard struct {
+	ID    uint64   `json:"id"`
+	Nodes []uint64 `json:"nodes"`
+}
+
+type ShardsResponse struct {
+	CommonResp
+	Rp            string       `json:"rp"`
+	Replica       int          `json:"replica"`
+	Duration      int64        `json:"duration"`
+	GroupDuration int64        `json:"group_duration"`
+	Groups        []ShardGroup `json:"groups"`
+}
+
+type ShardResponse struct {
+	CommonResp
+	ID    uint64   `json:"id"`
+	DB    string   `json:"db"`
+	Rp    string   `json:"rp"`
+	Nodes []uint64 `json:"nodes"`
+}
+
 type ShowDataNodesResponse struct {
 	CommonResp
 	DataNodes []DataNode `json:"data_nodes"`
@@ -538,23 +593,29 @@ type RequestType byte
 
 const (
 	// RequestTruncateShard represents a request for truncating shard.
-	RequestTruncateShard   RequestType = 1
-	RequestCopyShard                   = 2
-	RequestCopyShardStatus             = 3
-	RequestKillCopyShard               = 4
-	RequestRemoveShard                 = 5
-	RequestRemoveDataNode              = 6
-	RequestShowDataNodes               = 7
+	_ RequestType = iota
+	RequestTruncateShard
+	RequestCopyShard
+	RequestCopyShardStatus
+	RequestKillCopyShard
+	RequestRemoveShard
+	RequestRemoveDataNode
+	RequestShowDataNodes
+	RequestShards
+	RequestShard
 )
 
 type ResponseType byte
 
 const (
-	ResponseTruncateShard   ResponseType = 1
-	ResponseCopyShard                    = 2
-	ResponseCopyShardStatus              = 3
-	ResponseKillCopyShard                = 4
-	ResponseRemoveShard                  = 5
-	ResponseRemoveDataNode               = 6
-	ResponseShowDataNodes                = 7
+	_ ResponseType = iota
+	ResponseTruncateShard
+	ResponseCopyShard
+	ResponseCopyShardStatus
+	ResponseKillCopyShard
+	ResponseRemoveShard
+	ResponseRemoveDataNode
+	ResponseShowDataNodes
+	ResponseShards
+	ResponseShard
 )

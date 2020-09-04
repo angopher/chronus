@@ -45,6 +45,7 @@ import (
 	"github.com/angopher/chronus/services/controller"
 	"github.com/angopher/chronus/services/hh"
 	imeta "github.com/angopher/chronus/services/meta"
+	"github.com/angopher/chronus/x"
 )
 
 var startTime time.Time
@@ -205,23 +206,15 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 	if err := s.ClusterMetaClient.Open(); err != nil {
 		return nil, err
 	}
-
-	wait := s.ClusterMetaClient.WaitForDataChanged()
-	go s.ClusterMetaClient.RunSyncLoop()
-	//wait sync meta data from meta server
-	select {
-	case <-time.After(5 * time.Second):
-		//TODO:
-		panic("sync meta data failed")
-	case <-wait:
-	}
+	s.ClusterMetaClient.Start()
 
 	// If we've already created a data node for our id, we're done
 	n, err := s.ClusterMetaClient.DataNode(nodeID)
 	if err != nil {
+		s.Logger.Warn("Node id from store can't be used, try to create new", zap.Error(err))
 		n, err = s.ClusterMetaClient.CreateDataNode(s.httpAPIAddr, s.tcpAddr)
 		if err != nil {
-			log.Printf("Unable to create data node. err: %s", err.Error())
+			s.Logger.Warn(fmt.Sprint("Unable to create data node. err: ", err.Error()))
 			return nil, err
 		}
 	}
@@ -241,12 +234,31 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 	// Create the Subscriber service
 	s.Subscriber = subscriber.NewService(c.Subscriber)
 
+	clientPool := coordinator.NewClientPool(func(nodeId uint64) (x.ConnPool, error) {
+		return x.NewBoundedPool(
+			x.Max(1, x.Min(10, s.config.Coordinator.PoolMaxStreamsPerNode/20)),
+			s.config.Coordinator.PoolMaxStreamsPerNode,
+			time.Duration(s.config.Coordinator.PoolMaxIdleTimeout),
+			time.Duration(s.config.Coordinator.DailTimeout),
+			coordinator.NewClientConnFactory(
+				nodeId,
+				time.Duration(s.config.Coordinator.DailTimeout),
+				s.ClusterMetaClient,
+			).Dial,
+		)
+	})
+
 	// Initialize shard writer
-	s.ShardWriter = coordinator.NewShardWriter(time.Duration(s.config.Coordinator.WriteTimeout), s.config.Coordinator.PoolMaxConnections)
+	s.ShardWriter = coordinator.NewShardWriter(
+		time.Duration(s.config.Coordinator.WriteTimeout),
+		clientPool,
+	)
+	s.ShardWriter.WithLogger(s.Logger)
 
 	// Create the hinted handoff service
 	s.HintedHandoff = hh.NewService(c.HintedHandoff, s.ShardWriter, s.ClusterMetaClient)
 	s.HintedHandoff.Monitor = s.Monitor
+	s.HintedHandoff.WithLogger(s.Logger)
 
 	// Initialize points writer.
 	s.PointsWriter = coordinator.NewPointsWriter()
@@ -257,7 +269,11 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 	s.PointsWriter.HintedHandoff = s.HintedHandoff
 
 	// Initialize cluster extecutor
-	clusterExecutor := coordinator.NewClusterExecutor(s.Node, s.TSDBStore, s.ClusterMetaClient, s.config.Coordinator)
+	clusterExecutor := coordinator.NewClusterExecutor(
+		s.Node, s.TSDBStore,
+		s.ClusterMetaClient, clientPool,
+		s.config.Coordinator,
+	)
 	clusterExecutor.WithLogger(s.Logger)
 
 	// Initialize query executor.
