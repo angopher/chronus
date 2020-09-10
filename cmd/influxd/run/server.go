@@ -234,24 +234,22 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 	// Create the Subscriber service
 	s.Subscriber = subscriber.NewService(c.Subscriber)
 
-	clientPool := coordinator.NewClientPool(func(nodeId uint64) (x.ConnPool, error) {
-		return x.NewBoundedPool(
-			x.Max(1, x.Min(10, s.config.Coordinator.PoolMaxStreamsPerNode/20)),
-			s.config.Coordinator.PoolMaxStreamsPerNode,
-			time.Duration(s.config.Coordinator.PoolMaxIdleTimeout),
-			time.Duration(s.config.Coordinator.DailTimeout),
-			coordinator.NewClientConnFactory(
-				nodeId,
-				time.Duration(s.config.Coordinator.DailTimeout),
-				s.ClusterMetaClient,
-			).Dial,
-		)
-	})
-
 	// Initialize shard writer
 	s.ShardWriter = coordinator.NewShardWriter(
 		time.Duration(s.config.Coordinator.WriteTimeout),
-		clientPool,
+		coordinator.NewClientPool(func(nodeId uint64) (x.ConnPool, error) {
+			return x.NewBoundedPool(
+				1,
+				100,
+				time.Duration(s.config.Coordinator.PoolMaxIdleTimeout),
+				time.Duration(s.config.Coordinator.DailTimeout),
+				coordinator.NewClientConnFactory(
+					nodeId,
+					time.Duration(s.config.Coordinator.DailTimeout),
+					s.ClusterMetaClient,
+				).Dial,
+			)
+		}),
 	)
 	s.ShardWriter.WithLogger(s.Logger)
 
@@ -271,7 +269,20 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 	// Initialize cluster extecutor
 	clusterExecutor := coordinator.NewClusterExecutor(
 		s.Node, s.TSDBStore,
-		s.ClusterMetaClient, clientPool,
+		s.ClusterMetaClient,
+		coordinator.NewClientPool(func(nodeId uint64) (x.ConnPool, error) {
+			return x.NewBoundedPool(
+				x.Max(1, s.config.Coordinator.PoolMinStreamsPerNode),
+				s.config.Coordinator.PoolMaxStreamsPerNode,
+				time.Duration(s.config.Coordinator.PoolMaxIdleTimeout),
+				time.Duration(s.config.Coordinator.DailTimeout),
+				coordinator.NewClientConnFactory(
+					nodeId,
+					time.Duration(s.config.Coordinator.DailTimeout),
+					s.ClusterMetaClient,
+				).Dial,
+			)
+		}),
 		s.config.Coordinator,
 	)
 	clusterExecutor.WithLogger(s.Logger)

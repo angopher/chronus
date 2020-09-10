@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
 	"net"
 	"time"
 
@@ -73,11 +74,14 @@ func getConnWithRetry(pool *ClientPool, nodeId uint64, logger *zap.Logger) (x.Po
 		}
 		// do write test
 		if err = writeTestPacket(conn); err != nil {
+			conn.MarkUnusable()
+			conn.Close()
 			logger.Warn("Failed to get connection from pool", zap.Error(err))
 			continue
 		}
+		return conn, nil
 	}
-	return conn, err
+	return nil, err
 }
 
 func (me *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.Iterator, error) {
@@ -125,7 +129,7 @@ func (me *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context,
 
 	stats := query.IteratorStats{SeriesN: resp.SeriesN}
 	//conn.Close will be invoked when iterator.Close
-	itr := query.NewReaderIterator(ctx, conn, resp.DataType, stats)
+	itr := query.NewReaderIterator(ctx, newIteratorReader(conn, resp.Termination), resp.DataType, stats)
 	return itr, nil
 }
 
@@ -497,4 +501,65 @@ func (me *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string, sourc
 	}
 
 	return nil
+}
+
+type iteratorReader struct {
+	io.ReadCloser
+	terminator []byte
+	buf        []byte
+	reader     io.ReadCloser
+	judger     *x.CyclicBuffer
+	terminated bool
+	bytes      int
+}
+
+func newIteratorReader(rd io.ReadCloser, terminator []byte) *iteratorReader {
+	return &iteratorReader{
+		reader:     rd,
+		terminator: terminator,
+		buf:        make([]byte, len(terminator)),
+		judger:     x.NewCyclicBuffer(len(terminator)),
+	}
+}
+
+func shiftBuffer(data []byte, header []byte) {
+	offset := len(header)
+	if offset > len(data) {
+		return
+	}
+	for i := len(data) - 1; i >= offset; i-- {
+		data[i] = data[i-offset]
+	}
+	for i := 0; i < offset; i++ {
+		data[i] = header[i]
+	}
+}
+
+func (r *iteratorReader) Read(p []byte) (n int, err error) {
+	if r.terminated {
+		return 0, io.EOF
+	}
+	n, err = r.reader.Read(p)
+	bytes := r.bytes
+	r.bytes += n
+	if n == 0 {
+		return n, err
+	}
+	dumped := r.judger.Dump(r.buf)
+	r.judger.Write(p[:n])
+	if r.bytes <= len(r.terminator) {
+		return 0, nil
+	}
+	shiftBuffer(p, r.buf[:x.Min(dumped, n)])
+	if r.judger.Compare(r.terminator) {
+		r.terminated = true
+	}
+	if bytes < len(r.buf) {
+		return n - (len(r.buf) - bytes), err
+	}
+	return n, err
+}
+
+func (r *iteratorReader) Close() error {
+	return r.reader.Close()
 }

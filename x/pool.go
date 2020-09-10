@@ -254,6 +254,7 @@ func (c *boundedPool) wrapConn(conn net.Conn) *pooledConn {
 // net.Conn's Close() method.
 type pooledConn struct {
 	net.Conn
+	mu       sync.Mutex
 	c        *boundedPool
 	lastUse  time.Time
 	unusable bool
@@ -261,18 +262,32 @@ type pooledConn struct {
 
 // Close() puts the given connects back to the pool instead of closing it.
 func (p *pooledConn) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.Conn == nil {
+		return nil
+	}
+	defer func() {
+		p.Conn = nil
+	}()
 	if p.unusable {
 		if p.Conn != nil {
 			return p.Conn.Close()
 		}
 		return nil
 	}
-	p.lastUse = time.Now()
-	return p.c.put(p)
+	return p.c.put(&pooledConn{
+		Conn:     p.Conn,
+		c:        p.c,
+		lastUse:  time.Now(),
+		unusable: false,
+	})
 }
 
 // MarkUnusable() marks the connection not usable any more, to let the pool close it instead of returning it to pool.
 func (p *pooledConn) MarkUnusable() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.unusable {
 		return
 	}

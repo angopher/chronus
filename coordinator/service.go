@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/angopher/chronus/x"
 	"github.com/influxdata/influxdb"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/pkg/tracing"
@@ -338,8 +339,7 @@ func (s *Service) handleConn(conn net.Conn) {
 			return
 		default:
 		}
-		now := time.Now()
-		conn.SetReadDeadline(now.Add(500 * time.Millisecond))
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		typ, data, err := ReadTLV(conn)
 		conn.SetDeadline(time.Time{})
 		if err == io.EOF {
@@ -351,6 +351,9 @@ func (s *Service) handleConn(conn net.Conn) {
 		if err != nil {
 			s.Logger.Error("read error", zap.Error(err))
 			break
+		}
+		if typ == 0 {
+			continue
 		}
 		respType, resp, err := s.handle(conn, typ, data)
 		if resp == nil {
@@ -798,14 +801,13 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) {
 		seriesN = itr.Stats().SeriesN
 	}
 	// Encode success response.
-	if err := EncodeTLV(conn, respType, &CreateIteratorResponse{DataType: dataType, SeriesN: seriesN}); err != nil {
+	itrTerminator := x.RandBytes(8)
+	if err := EncodeTLV(conn, respType, &CreateIteratorResponse{DataType: dataType, SeriesN: seriesN, Termination: itrTerminator}); err != nil {
 		s.Logger.Error("error writing CreateIterator response, EncodeTLV fail", zap.Error(err))
 		atomic.AddInt64(&s.stats.CreateIteratorFail, 1)
 		ioError = true
 		return
 	}
-	//XXX
-	ioError = true
 
 	// Exit if no iterator was produced.
 	if itr == nil {
@@ -813,7 +815,8 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) {
 	}
 
 	// Stream iterator to connection.
-	if err := query.NewIteratorEncoder(conn).EncodeIterator(itr); err != nil {
+	encoder := query.NewIteratorEncoder(conn)
+	if err := encoder.EncodeIterator(itr); err != nil {
 		s.Logger.Error("encoding CreateIterator iterator fail", zap.Error(err))
 		atomic.AddInt64(&s.stats.CreateIteratorFail, 1)
 		ioError = true
@@ -824,12 +827,17 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) {
 
 	if trace != nil {
 		span.Finish()
-		if err := query.NewIteratorEncoder(conn).EncodeTrace(trace); err != nil {
+		if err := encoder.EncodeTrace(trace); err != nil {
 			s.Logger.Error("EncodeTrace fail", zap.Error(err))
 			atomic.AddInt64(&s.stats.CreateIteratorFail, 1)
 			ioError = true
 			return
 		}
+	}
+
+	// Write termination of iterator
+	if _, err := conn.Write(itrTerminator); err != nil {
+		ioError = true
 	}
 }
 

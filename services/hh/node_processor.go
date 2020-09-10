@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"sync"
 	"time"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/angopher/chronus/services/meta"
 	"github.com/influxdata/influxdb/models"
+	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )
 
@@ -22,6 +22,12 @@ const (
 	writeNodeReq       = "writeNodeReq"
 	writeNodeReqFail   = "writeNodeReqFail"
 	writeNodeReqPoints = "writeNodeReqPoints"
+)
+
+var (
+	// for concurrency control
+	maxActiveProcessorCount = int32(0)
+	activeProcessorCount    = int32(0)
 )
 
 // NodeProcessor encapsulates a queue of hinted-handoff data for a node, and the
@@ -45,7 +51,7 @@ type NodeProcessor struct {
 	writer shardWriter
 
 	stats  *NodeProcessorStatistics
-	Logger *log.Logger
+	Logger *zap.SugaredLogger
 }
 
 type NodeProcessorStatistics struct {
@@ -54,6 +60,10 @@ type NodeProcessorStatistics struct {
 	WriteNodeReq        int64
 	WriteNodeReqFail    int64
 	WriteNodeReqPoints  int64
+}
+
+func SetMaxActiveProcessorCount(n int32) {
+	maxActiveProcessorCount = n
 }
 
 // NewNodeProcessor returns a new NodeProcessor for the given node, using dir for
@@ -70,8 +80,12 @@ func NewNodeProcessor(nodeID uint64, dir string, w shardWriter, m metaClient) *N
 		writer:           w,
 		meta:             m,
 		stats:            &NodeProcessorStatistics{},
-		Logger:           log.New(os.Stderr, "[handoff] ", log.LstdFlags),
+		Logger:           zap.NewNop().Sugar(),
 	}
+}
+
+func (n *NodeProcessor) WithLogger(logger *zap.Logger) {
+	n.Logger = logger.With(zap.String("service", "hh_processor")).Sugar()
 }
 
 // Open opens the NodeProcessor. It will read and write data present in dir, and
@@ -190,46 +204,99 @@ func (n *NodeProcessor) LastModified() (time.Time, error) {
 func (n *NodeProcessor) run() {
 	defer n.wg.Done()
 
-	currInterval := time.Duration(n.RetryInterval)
-	if currInterval > time.Duration(n.RetryMaxInterval) {
-		currInterval = time.Duration(n.RetryMaxInterval)
+	waitTime := time.Duration(n.RetryInterval)
+	if waitTime > time.Duration(n.RetryMaxInterval) {
+		waitTime = time.Duration(n.RetryMaxInterval)
 	}
+	purgeTimer := time.NewTimer(n.PurgeInterval)
+	defer purgeTimer.Stop()
+	sendingTimer := time.NewTimer(waitTime)
+	defer sendingTimer.Stop()
 
 	for {
 		select {
 		case <-n.done:
 			return
 
-		case <-time.After(n.PurgeInterval):
+		case <-purgeTimer.C:
 			if err := n.queue.PurgeOlderThan(time.Now().Add(-n.MaxAge)); err != nil {
-				n.Logger.Printf("failed to purge for node %d: %s", n.nodeID, err.Error())
+				n.Logger.Warnf("failed to purge for node %d: %s", n.nodeID, err.Error())
 			}
+			purgeTimer.Reset(n.PurgeInterval)
 
-		case <-time.After(currInterval):
-			limiter := rate.NewLimiter(rate.Limit(n.RetryRateLimit), 10*n.RetryRateLimit)
-			ctx := context.Background()
-			for {
-				c, err := n.SendWrite()
-				if err != nil {
-					if err == io.EOF {
-						// No more data, return to configured interval
-						currInterval = time.Duration(n.RetryInterval)
-					} else {
-						currInterval = currInterval * 2
-						if currInterval > time.Duration(n.RetryMaxInterval) {
-							currInterval = time.Duration(n.RetryMaxInterval)
-						}
-					}
-					break
-				}
+		case <-sendingTimer.C:
+			waitTime = n.sendingLoop(waitTime)
+			sendingTimer.Reset(waitTime)
 
-				// Success! Ensure backoff is cancelled.
-				currInterval = time.Duration(n.RetryInterval)
-
-				limiter.WaitN(ctx, c)
-			}
 		}
 	}
+}
+
+func concurrencyAllow() bool {
+	if maxActiveProcessorCount < 1 {
+		return true
+	}
+	waiter := time.NewTimer(time.Second)
+	defer waiter.Stop()
+	for {
+		select {
+		case <-waiter.C:
+			// timeout
+			return false
+		default:
+			if atomic.AddInt32(&activeProcessorCount, 1) <= maxActiveProcessorCount {
+				return true
+			}
+			// restore & next
+			atomic.AddInt32(&activeProcessorCount, -1)
+		}
+	}
+}
+
+func (n *NodeProcessor) sendingLoop(curDelay time.Duration) (nextDelay time.Duration) {
+	var (
+		sent int
+		err  error
+	)
+
+	// concurrency check
+	if maxActiveProcessorCount > 0 {
+		if !concurrencyAllow() {
+			n.Logger.Info("concurrency control, skip scheduling once")
+			return n.RetryInterval
+		}
+		defer atomic.AddInt32(&activeProcessorCount, -1)
+	}
+
+	// Bytes rate limit
+	if n.RetryRateLimit > 0 {
+		bytesLimiter := rate.NewLimiter(rate.Limit(n.RetryRateLimit), 10*n.RetryRateLimit)
+		defer func() {
+			if sent > 0 {
+				n.Logger.Infof("write to %d with %d bytes", n.nodeID, sent)
+				bytesLimiter.WaitN(context.Background(), sent)
+			}
+		}()
+	}
+
+	sent, err = n.SendWrite()
+	if err == nil {
+		// Success! Ensure backoff is cancelled.
+		nextDelay = n.RetryInterval
+		return
+	}
+
+	if err == io.EOF {
+		// No more data, return to configured interval
+		nextDelay = n.RetryInterval
+	} else {
+		// backoff
+		nextDelay = 2 * curDelay
+		if nextDelay > n.RetryMaxInterval {
+			nextDelay = n.RetryMaxInterval
+		}
+	}
+	return
 }
 
 // SendWrite attempts to sent the current block of hinted data to the target node. If successful,
@@ -256,10 +323,10 @@ func (n *NodeProcessor) SendWrite() (int, error) {
 	// unmarshal the byte slice back to shard ID and points
 	shardID, points, err := unmarshalWrite(buf)
 	if err != nil {
-		n.Logger.Printf("unmarshal write failed: %v", err)
+		n.Logger.Warnf("unmarshal write failed: %v", err)
 		// Try to skip it.
 		if err := n.queue.Advance(); err != nil {
-			n.Logger.Printf("failed to advance queue for node %d: %s", n.nodeID, err.Error())
+			n.Logger.Warnf("failed to advance queue for node %d: %s", n.nodeID, err.Error())
 		}
 		return 0, err
 	}
@@ -272,7 +339,7 @@ func (n *NodeProcessor) SendWrite() (int, error) {
 	atomic.AddInt64(&n.stats.WriteNodeReqPoints, int64(len(points)))
 
 	if err := n.queue.Advance(); err != nil {
-		n.Logger.Printf("failed to advance queue for node %d: %s", n.nodeID, err.Error())
+		n.Logger.Warnf("failed to advance queue for node %d: %s", n.nodeID, err.Error())
 	}
 
 	return len(buf), nil
@@ -300,7 +367,7 @@ func (n *NodeProcessor) Tail() string {
 func (n *NodeProcessor) Active() (bool, error) {
 	nio, err := n.meta.DataNode(n.nodeID)
 	if err != nil && err != meta.ErrNodeNotFound {
-		n.Logger.Printf("failed to determine if node %d is active: %s", n.nodeID, err.Error())
+		n.Logger.Warnf("failed to determine if node %d is active: %s", n.nodeID, err.Error())
 		return false, err
 	}
 	return nio != nil, nil

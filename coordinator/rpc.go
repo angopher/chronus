@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"time"
+
 	"github.com/angopher/chronus/coordinator/internal"
 	"github.com/gogo/protobuf/proto"
 	"github.com/influxdata/influxdb/models"
@@ -11,8 +14,6 @@ import (
 	"github.com/influxdata/influxdb/query"
 	"github.com/influxdata/influxdb/tsdb"
 	"github.com/influxdata/influxql"
-	"regexp"
-	"time"
 )
 
 //go:generate protoc --gogo_out=. internal/data.proto
@@ -159,7 +160,9 @@ func (r *ExecuteStatementRequest) SetStatement(statement string) {
 func (r *ExecuteStatementRequest) Database() string { return r.pb.GetDatabase() }
 
 // SetDatabase sets the database name.
-func (r *ExecuteStatementRequest) SetDatabase(database string) { r.pb.Database = proto.String(database) }
+func (r *ExecuteStatementRequest) SetDatabase(database string) {
+	r.pb.Database = proto.String(database)
+}
 
 // MarshalBinary encodes the object to a binary format.
 func (r *ExecuteStatementRequest) MarshalBinary() ([]byte, error) {
@@ -685,9 +688,10 @@ func (r *CreateIteratorRequest) UnmarshalBinary(data []byte) error {
 
 // CreateIteratorResponse represents a response from remote iterator creation.
 type CreateIteratorResponse struct {
-	DataType influxql.DataType
-	SeriesN  int
-	Err      error
+	DataType    influxql.DataType
+	SeriesN     int
+	Err         error
+	Termination []byte
 }
 
 // MarshalBinary encodes r to a binary format.

@@ -23,6 +23,7 @@ const (
 	// A value of zero will make the maximum query limit unlimited.
 	DefaultMaxConcurrentQueries = 0
 
+	DefaultPoolMinStreamsPerNode = 5
 	DefaultPoolMaxStreamsPerNode = 200
 
 	// DefaultMaxSelectPointN is the maximum number of points a SELECT can process.
@@ -40,6 +41,7 @@ const (
 type Config struct {
 	DailTimeout               toml.Duration `toml:"dial-timeout"`
 	PoolMaxIdleTimeout        toml.Duration `toml:"pool-max-idle-time"`
+	PoolMinStreamsPerNode     int           `toml:"pool-min-streams-per-node"`
 	PoolMaxStreamsPerNode     int           `toml:"pool-max-streams-per-node"`
 	ShardReaderTimeout        toml.Duration `toml:"shard-reader-timeout"`
 	ClusterTracing            bool          `toml:"cluster-tracing"`
@@ -59,6 +61,7 @@ func NewConfig() Config {
 	return Config{
 		DailTimeout:               toml.Duration(DefaultDialTimeout),
 		PoolMaxIdleTimeout:        toml.Duration(DefaultPoolMaxIdleTimeout),
+		PoolMinStreamsPerNode:     DefaultPoolMinStreamsPerNode,
 		PoolMaxStreamsPerNode:     DefaultPoolMaxStreamsPerNode,
 		ShardReaderTimeout:        toml.Duration(DefaultShardReaderTimeout),
 		ClusterTracing:            false,
@@ -77,6 +80,7 @@ func (c Config) Diagnostics() (*diagnostics.Diagnostics, error) {
 	return diagnostics.RowFromMap(map[string]interface{}{
 		"dail-timeout":               c.DailTimeout,
 		"pool-max-idle-time":         c.PoolMaxIdleTimeout,
+		"pool-min-streams-per-node":  c.PoolMinStreamsPerNode,
 		"pool-max-streams-per-node":  c.PoolMaxStreamsPerNode,
 		"shard-reader-timeout":       c.ShardReaderTimeout,
 		"cluster-tracing":            c.ClusterTracing,

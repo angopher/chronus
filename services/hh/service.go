@@ -60,6 +60,7 @@ type metaClient interface {
 func NewService(c Config, w shardWriter, m metaClient) *Service {
 	//key := strings.Join([]string{"hh", c.Dir}, ":")
 	//tags := map[string]string{"path": c.Dir}
+	SetMaxActiveProcessorCount(c.RetryConcurrency)
 
 	return &Service{
 		cfg:         c,
@@ -74,6 +75,15 @@ func NewService(c Config, w shardWriter, m metaClient) *Service {
 
 func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "handoff")).Sugar()
+}
+
+func (s *Service) createProcessor(nodeID uint64) *NodeProcessor {
+	n := NewNodeProcessor(nodeID, s.pathforNode(nodeID), s.shardWriter, s.MetaClient)
+	n.RetryInterval = time.Duration(s.cfg.RetryInterval)
+	n.RetryMaxInterval = time.Duration(s.cfg.RetryMaxInterval)
+	n.RetryRateLimit = int(s.cfg.RetryRateLimit)
+	n.WithLogger(s.Logger.Desugar())
+	return n
 }
 
 // Open opens the hinted handoff service.
@@ -111,7 +121,7 @@ func (s *Service) Open() error {
 			continue
 		}
 
-		n := NewNodeProcessor(nodeID, s.pathforNode(nodeID), s.shardWriter, s.MetaClient)
+		n := s.createProcessor(nodeID)
 		if err := n.Open(); err != nil {
 			return err
 		}
@@ -190,7 +200,7 @@ func (s *Service) WriteShard(shardID, ownerID uint64, points []models.Point) err
 
 			processor, ok = s.processors[ownerID]
 			if !ok {
-				processor = NewNodeProcessor(ownerID, s.pathforNode(ownerID), s.shardWriter, s.MetaClient)
+				processor = s.createProcessor(ownerID)
 				if err := processor.Open(); err != nil {
 					return err
 				}
