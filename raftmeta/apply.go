@@ -317,9 +317,9 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		//消除DeleteAt和TruncatedAt对checksum的影响
 		for i := range mcd.Databases {
 			db := &mcd.Databases[i]
-			for j, _ := range db.RetentionPolicies {
+			for j := range db.RetentionPolicies {
 				rp := &db.RetentionPolicies[j]
-				for k, _ := range rp.ShardGroups {
+				for k := range rp.ShardGroups {
 					sg := &rp.ShardGroups[k]
 					sg.DeletedAt = time.Unix(0, 0)
 					sg.TruncatedAt = time.Unix(0, 0)
