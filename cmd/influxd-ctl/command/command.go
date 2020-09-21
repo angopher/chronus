@@ -66,8 +66,6 @@ func ShardCommand() *cli.Command {
 				),
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 2 {
-						color.Red("Please specify database and retention policy\n")
-						fmt.Println()
 						return errors.New("Please specify database and retention policy")
 					}
 					if err := action.ListShard(DataNodeAddress, ctx.Args().Get(0), ctx.Args().Get(1)); err != nil {

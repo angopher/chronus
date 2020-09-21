@@ -67,9 +67,8 @@ func (m *Manager) execute(t *Task) (err error) {
 	return fmt.Errorf("Migration for shard %d failed after retries", t.ShardId)
 }
 
-func backupFromRemote(t *Task, logger *zap.Logger) (*os.File, error) {
+func backupFromRemote(t *Task, logger *zap.SugaredLogger) (*os.File, error) {
 	// prepare local tmp file
-	suger := logger.Sugar()
 	tmpFilePath := filepath.Join(t.TmpStorePath, fmt.Sprint("shard_", t.ShardId))
 	tmpFile, err := os.Create(tmpFilePath)
 	if err != nil {
@@ -82,6 +81,7 @@ func backupFromRemote(t *Task, logger *zap.Logger) (*os.File, error) {
 		return tmpFile, err
 	}
 	defer conn.Close()
+	logger.Info("Connected to ", t.SrcHost)
 
 	req := &snapshotter.Request{
 		Type:                  snapshotter.RequestShardBackup,
@@ -118,17 +118,16 @@ func backupFromRemote(t *Task, logger *zap.Logger) (*os.File, error) {
 		// limiter in post way
 		t.Limiter.WaitN(ctx, n)
 		if t.ProgressLimiter.Allow() {
-			suger.Infof("Mirating shard %d: %d copied", t.ShardId, t.Copied)
+			logger.Infof("Migrating shard %d: %d copied", t.ShardId, t.Copied)
 		}
 	}
-	suger.Infof("Transfer Shard %d completely", t.ShardId)
+	logger.Infof("Transfer Shard %d completely with %d bytes", t.ShardId, t.Copied)
 
 	// XXX: Verify
 	return tmpFile, nil
 }
 
 func (m *Manager) replicate(t *Task) error {
-	sugar := m.logger.Sugar()
 	if x.Exists(t.DstStorePath) != x.NotExisted {
 		t.error(errors.New("Destination shard directory has already existed"))
 		return nil
@@ -139,6 +138,7 @@ func (m *Manager) replicate(t *Task) error {
 	}
 
 	// transfer to local
+	m.logger.Infof("start to execute task copying %d from %s", t.ShardId, t.SrcHost)
 	tmpFile, err := backupFromRemote(t, m.logger)
 	defer func() {
 		// remove tmp file
@@ -154,7 +154,7 @@ func (m *Manager) replicate(t *Task) error {
 	os.MkdirAll(t.DstStorePath, os.FileMode(0755))
 	err = restoreFromTar(tmpFile.Name(), t.DstStorePath)
 	if err != nil {
-		sugar.Errorf("Unpack from backup failed for shard %d: %v", t.ShardId, err)
+		m.logger.Errorf("Unpack from backup failed for shard %d: %v", t.ShardId, err)
 		// remove incorrect data
 		os.RemoveAll(t.DstStorePath)
 		return err

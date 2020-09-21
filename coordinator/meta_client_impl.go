@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/influxdata/influxdb/services/meta"
@@ -606,5 +607,9 @@ func RequestAndParseResponse(url string, data interface{}, resp interface{}) err
 		return err
 	}
 
-	return json.Unmarshal(resBody, resp)
+	err = json.Unmarshal(resBody, resp)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error response(unmarshal failed):", string(resBody))
+	}
+	return err
 }

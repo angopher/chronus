@@ -8,6 +8,7 @@ import (
 
 	"github.com/angopher/chronus/services/migrate"
 	"github.com/angopher/chronus/x"
+	"go.uber.org/zap"
 )
 
 func (s *Service) copyShard(sourceAddr string, shardId uint64) error {
@@ -50,8 +51,15 @@ func (s *Service) copyShard(sourceAddr string, shardId uint64) error {
 
 	err = s.TSDBStore.CreateShard(task.Database, task.Retention, task.ShardId, true)
 	if err != nil {
+		s.Logger.Warn("Failed to load shard into memory", zap.Error(err))
 		return err
 	}
 
-	return s.MetaClient.AddShardOwner(task.ShardId, s.Node.ID)
+	err = s.MetaClient.AddShardOwner(task.ShardId, s.Node.ID)
+	if err != nil {
+		s.Logger.Warn("Failed to add as owner", zap.Error(err))
+		return err
+	}
+	s.Logger.Info("Successfully add as owner", zap.Uint64("shard", task.ShardId))
+	return err
 }

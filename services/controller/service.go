@@ -70,6 +70,7 @@ func (s *Service) Open() error {
 	s.Logger.Info("Starting controller service")
 
 	s.wg.Add(1)
+	s.migrateManager.Start()
 	go s.serve()
 	return nil
 }
@@ -81,6 +82,7 @@ func (s *Service) Close() error {
 			return err
 		}
 	}
+	s.migrateManager.Close()
 	s.wg.Wait()
 	return nil
 }
@@ -88,6 +90,7 @@ func (s *Service) Close() error {
 // WithLogger sets the logger on the service.
 func (s *Service) WithLogger(log *zap.Logger) {
 	s.Logger = log.With(zap.String("service", "controller"))
+	s.migrateManager.WithLogger(log.With(zap.String("service", "migrate_manager")))
 }
 
 // serve serves snapshot requests from the listener.
@@ -104,7 +107,7 @@ func (s *Service) serve() {
 			s.Logger.Info("Error accepting snapshot request", zap.Error(err))
 			continue
 		}
-		s.Logger.Info("accept new conn.")
+		s.Logger.Debug("accept new conn.")
 
 		// Handle connection in separate goroutine.
 		s.wg.Add(1)
@@ -202,8 +205,7 @@ func (s *Service) handleCopyShard(conn net.Conn) error {
 		return err
 	}
 
-	s.copyShard(req.SourceNodeAddr, req.ShardID)
-	return nil
+	return s.copyShard(req.SourceNodeAddr, req.ShardID)
 }
 
 func (s *Service) copyShardResponse(w io.Writer, e error) {
@@ -320,6 +322,10 @@ func (s *Service) handleRemoveShard(conn net.Conn) error {
 	}
 
 	if s.Node.ID == ni.ID {
+		shard := s.TSDBStore.Shard(req.ShardID)
+		if shard == nil {
+			return errors.New("Shard not found")
+		}
 		if err := s.TSDBStore.DeleteShard(req.ShardID); err != nil {
 			s.Logger.Error("DeleteShard fail.", zap.Error(err))
 			return err

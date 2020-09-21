@@ -47,15 +47,20 @@ type Task struct {
 
 func (t *Task) succ() {
 	t.Finished = true
-	t.C <- nil
-	t.Closer.Close()
+	close(t.C)
+	if t.Closer != nil {
+		t.Closer.Close()
+	}
 }
 
 func (t *Task) error(err error) {
 	t.Error = err
 	t.Finished = true
 	t.C <- err
-	t.Closer.Close()
+	close(t.C)
+	if t.Closer != nil {
+		t.Closer.Close()
+	}
 }
 
 // Manager is the container of tasks running or queued
@@ -67,7 +72,7 @@ type Manager struct {
 	taskMap    map[uint64]*Task
 	taskQueue  []*Task
 	parallel   int
-	logger     *zap.Logger
+	logger     *zap.SugaredLogger
 	shouldStop bool
 }
 
@@ -84,6 +89,7 @@ func NewManager(parallel int) *Manager {
 		taskMap:   make(map[uint64]*Task),
 		taskQueue: make([]*Task, 0, TASK_PARALLEL_MAX),
 		cond:      sync.NewCond(&sync.Mutex{}),
+		logger:    zap.NewNop().Sugar(),
 	}
 	return m
 }
@@ -92,6 +98,7 @@ func (m *Manager) Start() {
 	for i := 0; i < m.parallel; i++ {
 		go m.loop()
 	}
+	m.logger.Infof("%d migrators started", m.parallel)
 }
 
 func (m *Manager) loop() {
@@ -119,7 +126,7 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) WithLogger(log *zap.Logger) {
-	m.logger = log.With(zap.String("service", "migrate.Manager"))
+	m.logger = log.With(zap.String("service", "migrate.Manager")).Sugar()
 }
 
 func (m *Manager) pop() *Task {
@@ -140,10 +147,12 @@ func (m *Manager) Add(task *Task) error {
 	if _, ok := m.taskMap[task.ShardId]; ok {
 		return ErrTaskDuplicated
 	}
-	task.C = make(chan error, 1)
+	if task.C == nil {
+		task.C = make(chan error, 1)
+	}
 	// Currently limit to 5MB/s, 10MB/s in burst
 	task.Limiter = rate.NewLimiter(5*1024*1024, 10*1024*1024)
-	task.ProgressLimiter = rate.NewLimiter(0.05, 10) // 1 log every 20 seconds
+	task.ProgressLimiter = rate.NewLimiter(0.05, 1) // 1 log every 20 seconds
 	m.taskMap[task.ShardId] = task
 	m.taskQueue = append(m.taskQueue, task)
 	m.cond.Signal()

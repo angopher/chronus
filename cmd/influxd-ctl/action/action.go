@@ -64,12 +64,14 @@ func ListShard(addr, db, rp string) error {
 	reqTyp := byte(controller.RequestShards)
 	req.Database = db
 	req.RetentionPolicy = rp
-	if err := RequestAndWaitResp(addr, reqTyp, respTyp, req, &resp); err != nil {
+	nodes, err := getNodes(addr)
+	if err != nil {
+		return err
+	}
+	if err = RequestAndWaitResp(addr, reqTyp, respTyp, req, &resp); err != nil {
 		return err
 	}
 	if resp.Code != 0 {
-		color.Set(color.Bold)
-		color.Red("Error: ", resp.Msg, "\n")
 		return errors.New(resp.Msg)
 	}
 
@@ -104,7 +106,18 @@ func ListShard(addr, db, rp string) error {
 			"\n",
 		)
 		for _, shard := range g.Shards {
-			color.Cyan("      |--Shard: %d\tNodes: %v\n", shard.ID, shard.Nodes)
+			fmt.Print(color.CyanString("      |--Shard: %d\tNodes: [", shard.ID))
+			first := true
+			for _, id := range shard.Nodes {
+				if n, ok := nodes[id]; ok {
+					if !first {
+						fmt.Print(color.CyanString(", "))
+					}
+					fmt.Print(color.CyanString("%s", n.TcpAddr))
+					first = false
+				}
+			}
+			fmt.Println(color.CyanString("]"))
 		}
 		if len(g.Shards) == 0 {
 			fmt.Println("No shard")
@@ -155,7 +168,7 @@ func CopyShardStatus(addr string) error {
 	color.Set(color.Bold)
 	color.Green("Running Copy Tasks:\n")
 	for _, t := range resp.Tasks {
-		fmt.Print(t.ShardID, "\t", t.Database, "\t", t.Rp, "\t", t.CurrentSize, "/", t.TotalSize, "\t", t.Source, "=>", t.Destination, "\n")
+		fmt.Print(t.ShardID, "\t", t.Database, "\t", t.Rp, "\t", t.CurrentSize, "/", t.TotalSize, "\t", t.Source, "\n")
 	}
 	fmt.Println()
 	return nil
@@ -224,17 +237,28 @@ func RemoveDataNode(addr, removed_addr string) error {
 	return nil
 }
 
-func ShowDataNodes(addr string) error {
+func getNodes(addr string) (map[uint64]controller.DataNode, error) {
 	var resp controller.ShowDataNodesResponse
 	respTyp := byte(controller.ResponseShowDataNodes)
 	reqTyp := byte(controller.RequestShowDataNodes)
 	if err := RequestAndWaitResp(addr, reqTyp, respTyp, struct{}{}, &resp); err != nil {
-		return err
+		return nil, err
 	}
+	nodes := make(map[uint64]controller.DataNode)
+	for _, n := range resp.DataNodes {
+		nodes[n.ID] = n
+	}
+	return nodes, nil
+}
 
+func ShowDataNodes(addr string) error {
 	color.Set(color.Bold)
 	color.Green("Nodes:\n")
-	for _, n := range resp.DataNodes {
+	nodes, err := getNodes(addr)
+	if err != nil {
+		return err
+	}
+	for _, n := range nodes {
 		fmt.Print(n.ID, "\thttp://", n.HttpAddr, "\ttcp://", n.TcpAddr, "\n")
 	}
 	fmt.Println()
