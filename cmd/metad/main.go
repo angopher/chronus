@@ -17,10 +17,36 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+func initialLogging(config *raftmeta.Config) (*zap.Logger, error) {
+	cfg := logger.NewConfig()
+	switch strings.ToLower(config.LogLevel) {
+	case "info":
+		cfg.Level = zap.InfoLevel
+	case "warn", "warning":
+		cfg.Level = zap.WarnLevel
+	case "debug":
+		cfg.Level = zap.DebugLevel
+	case "fatal":
+		cfg.Level = zap.FatalLevel
+	case "panic":
+		cfg.Level = zap.PanicLevel
+	}
+	if config.LogDir != "" {
+		dir := strings.TrimRight(config.LogDir, string(filepath.Separator))
+		return cfg.New(&lumberjack.Logger{
+			Filename:   filepath.Join(dir, "metad.log"),
+			MaxSize:    100,
+			MaxBackups: 5,
+			Compress:   true,
+		})
+	} else {
+		return cfg.New(os.Stderr)
+	}
+}
+
 func main() {
 	f := flag.NewFlagSet("metad", flag.ExitOnError)
 	configFile := f.String("config", "", "Specify config file")
-	logDir := f.String("logdir", "", "Log to specified directory")
 	f.Parse(os.Args[1:])
 
 	config := raftmeta.NewConfig()
@@ -40,22 +66,14 @@ func main() {
 		RetentionAutoCreate: config.RetentionAutoCreate,
 		LoggingEnabled:      true,
 	})
-
-	var log *zap.Logger
-	if *logDir != "" {
-		dir := strings.TrimRight(*logDir, string(filepath.Separator))
-		log = logger.New(&lumberjack.Logger{
-			Filename:   filepath.Join(dir, "metad.log"),
-			MaxSize:    100,
-			MaxBackups: 5,
-			Compress:   true,
-		})
-	} else {
-		log = logger.New(os.Stderr)
+	log, err := initialLogging(&config)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error to initialize logging", err)
+		return
 	}
 
 	metaCli.WithLogger(log)
-	err := metaCli.Open()
+	err = metaCli.Open()
 	x.Check(err)
 
 	node := raftmeta.NewRaftNode(config)

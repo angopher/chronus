@@ -371,7 +371,9 @@ func (s *RaftNode) Run() {
 			if leader == s.ID {
 				go func() {
 					err := s.trigerSnapshot()
-					s.Logger.Error("calculateSnapshot fail", zap.Error(err))
+					if err != nil {
+						s.Logger.Error("calculateSnapshot fail", zap.Error(err))
+					}
 				}()
 			}
 		case <-checkSumTicker.C:
@@ -417,7 +419,7 @@ func (s *RaftNode) Run() {
 				s.applyCh <- ew
 			}
 			for _, entry := range rd.CommittedEntries {
-				s.Logger.Info("process entry", zap.Uint64("term", entry.Term), zap.Uint64("index", entry.Index), zap.String("type", entry.Type.String()))
+				s.Logger.Debug("process entry", zap.Uint64("term", entry.Term), zap.Uint64("index", entry.Index), zap.String("type", entry.Type.String()))
 				ew := &internal.EntryWrapper{Entry: entry, Restore: false}
 				s.applyCh <- ew
 			}
@@ -512,7 +514,7 @@ func (s *RaftNode) processApplyCh() {
 					x.Fatalf("Unable to unmarshal proposal: %v %q\n", err, e.Data)
 				}
 				err := s.applyCommitted(proposal, e.Index)
-				s.Logger.Info("Applied proposal", zap.String("key", proposal.Key), zap.Uint64("index", e.Index), zap.Error(err))
+				s.Logger.Debug("Applied proposal", zap.String("key", proposal.Key), zap.Uint64("index", e.Index), zap.Error(err))
 
 				s.props.Done(proposal.Key, err)
 			}

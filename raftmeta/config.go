@@ -1,11 +1,12 @@
 package raftmeta
 
 import (
+	"io/ioutil"
+	"net"
+
 	"github.com/BurntSushi/toml"
 	"golang.org/x/text/encoding/unicode"
 	"golang.org/x/text/transform"
-	"io/ioutil"
-	"net"
 )
 
 const (
@@ -37,6 +38,9 @@ type Config struct {
 	SnapshotIntervalSec int    `toml:"snapshot-interval"`
 	ChecksumIntervalSec int    `toml:"checksum-interval"`
 	RetentionAutoCreate bool   `toml:"retention-auto-create"`
+
+	LogLevel string `toml:"log-level"`
+	LogDir   string `toml:"log-dir"`
 }
 
 type Peer struct {

@@ -128,8 +128,6 @@ func GetShard(addr, shard string) error {
 		return err
 	}
 	if resp.Code != 0 {
-		color.Set(color.Bold)
-		color.Red("Error: ", resp.Msg, "\n")
 		return errors.New(resp.Msg)
 	}
 

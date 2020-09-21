@@ -17,23 +17,6 @@ var (
 	DataNodeAddress string
 )
 
-func DatabaseCommand() *cli.Command {
-	return &cli.Command{
-		Name:  "database",
-		Usage: "Database info",
-		Subcommands: []*cli.Command{
-			{
-				Name:  "list",
-				Usage: "list all databases",
-				Action: func(ctx *cli.Context) error {
-
-					return nil
-				},
-			},
-		},
-	}
-}
-
 func NodeCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "node",
@@ -107,7 +90,7 @@ func ShardCommand() *cli.Command {
 						return errors.New("Please specify shard id")
 					}
 					if err := action.GetShard(DataNodeAddress, ctx.Args().Get(0)); err != nil {
-						fmt.Println(err)
+						fmt.Println(err.Error())
 					}
 					return nil
 				},

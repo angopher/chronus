@@ -13,7 +13,6 @@ func main() {
 	app.Usage = "Maintain the data nodes in cluster"
 
 	app.Commands = []*cli.Command{
-		command.DatabaseCommand(),
 		command.NodeCommand(),
 		command.ShardCommand(),
 	}

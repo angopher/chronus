@@ -1359,17 +1359,19 @@ func (s *MetaService) AcquireLease(w http.ResponseWriter, r *http.Request) {
 	err = s.ProposeAndWait(internal.AcquireLease, data, lease)
 	if err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("AcquireLease fail",
-			zap.String("Name", req.Name),
-			zap.Uint64("NodeId", req.NodeId),
-			zap.Error(err))
+		if !strings.Contains(err.Error(), "another node has the lease") {
+			s.Logger.Error("AcquireLease fail",
+				zap.String("Name", req.Name),
+				zap.Uint64("NodeId", req.NodeId),
+				zap.Error(err))
+		}
 		return
 	}
 
 	resp.Lease = *lease
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("AcquireLease ok",
+	s.Logger.Debug("AcquireLease ok",
 		zap.String("Name", req.Name),
 		zap.Uint64("NodeId", req.NodeId))
 }

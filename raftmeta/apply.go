@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/angopher/chronus/raftmeta/internal"
 	"github.com/angopher/chronus/x"
 	"github.com/influxdata/influxdb/services/meta"
 	"go.uber.org/zap"
-	"time"
 )
 
 func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) error {
@@ -17,7 +18,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		s.ApplyCallBack(proposal, index)
 	}
 	msgName, _ := internal.MessageTypeName[proposal.Type]
-	s.Logger.Info("applyCommitted ", zap.String("type", msgName))
+	s.Logger.Debug("applyCommitted ", zap.String("type", msgName))
 
 	pctx := s.props.pctx(proposal.Key)
 	if pctx == nil {
@@ -42,19 +43,19 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req DropDatabaseReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DropDatabase(req.Name)
 	case internal.DropRetentionPolicy:
 		var req DropRetentionPolicyReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DropRetentionPolicy(req.Database, req.Policy)
 	case internal.CreateShardGroup:
 		var req CreateShardGroupReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		sg, err := s.MetaCli.CreateShardGroup(req.Database, req.Policy, time.Unix(req.Timestamp, 0))
 		if err == nil && pctx.retData != nil {
 			if sg != nil {
@@ -68,7 +69,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req CreateDataNodeReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		ni, err := s.MetaCli.CreateDataNode(req.HttpAddr, req.TcpAddr)
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(ni != nil)
@@ -79,13 +80,13 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req DeleteDataNodeReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DeleteDataNode(req.Id)
 	case internal.CreateRetentionPolicy:
 		var req CreateRetentionPolicyReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 
 		var duration *time.Duration
 		if req.Rps.Duration > 0 {
@@ -109,7 +110,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req UpdateRetentionPolicyReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 
 		var duration *time.Duration
 		if req.Rps.Duration > 0 {
@@ -138,7 +139,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req CreateDatabaseWithRetentionPolicyReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 
 		var duration *time.Duration
 		if req.Rps.Duration > 0 {
@@ -162,7 +163,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req CreateUserReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		user, err := s.MetaCli.CreateUser(req.Name, req.Password, req.Admin)
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(user != nil)
@@ -174,35 +175,35 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req DropUserReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DropUser(req.Name)
 
 	case internal.UpdateUser:
 		var req UpdateUserReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.UpdateUser(req.Name, req.Password)
 
 	case internal.SetPrivilege:
 		var req SetPrivilegeReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.SetPrivilege(req.UserName, req.Database, req.Privilege)
 
 	case internal.SetAdminPrivilege:
 		var req SetAdminPrivilegeReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.SetAdminPrivilege(req.UserName, req.Admin)
 
 	case internal.Authenticate:
 		var req AuthenticateReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		user, err := s.MetaCli.Authenticate(req.UserName, req.Password)
 		if err == nil {
 			x.AssertTrue(user != nil)
@@ -214,28 +215,28 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req AddShardOwnerReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("add shard owner req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("add shard owner req %+v", req))
 		return s.MetaCli.AddShardOwner(req.ShardID, req.NodeID)
 
 	case internal.RemoveShardOwner:
 		var req RemoveShardOwnerReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("remove shard owner req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("remove shard owner req %+v", req))
 		return s.MetaCli.RemoveShardOwner(req.ShardID, req.NodeID)
 
 	case internal.DropShard:
 		var req DropShardReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DropShard(req.Id)
 
 	case internal.TruncateShardGroups:
 		var req TruncateShardGroupsReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.TruncateShardGroups(req.Time)
 
 	case internal.PruneShardGroups:
@@ -245,49 +246,49 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		var req DeleteShardGroupReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DeleteShardGroup(req.Database, req.Policy, req.Id)
 
 	case internal.PrecreateShardGroups:
 		var req PrecreateShardGroupsReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.PrecreateShardGroups(req.From, req.To)
 
 	case internal.CreateContinuousQuery:
 		var req CreateContinuousQueryReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.CreateContinuousQuery(req.Database, req.Name, req.Query)
 
 	case internal.DropContinuousQuery:
 		var req DropContinuousQueryReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DropContinuousQuery(req.Database, req.Name)
 
 	case internal.CreateSubscription:
 		var req CreateSubscriptionReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.CreateSubscription(req.Database, req.Rp, req.Name, req.Mode, req.Destinations)
 
 	case internal.DropSubscription:
 		var req DropSubscriptionReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		return s.MetaCli.DropSubscription(req.Database, req.Rp, req.Name)
 
 	case internal.AcquireLease:
 		var req AcquireLeaseReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
-		s.Logger.Info(fmt.Sprintf("req %+v", req))
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
 		lease, err := s.leases.Acquire(req.Name, req.NodeId)
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(lease != nil)
@@ -314,7 +315,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		mcd := s.MetaCli.Data()
 
 		//消除DeleteAt和TruncatedAt对checksum的影响
-		for i, _ := range mcd.Databases {
+		for i := range mcd.Databases {
 			db := &mcd.Databases[i]
 			for j, _ := range db.RetentionPolicies {
 				rp := &db.RetentionPolicies[j]
@@ -331,27 +332,33 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		s.lastChecksum.checksum = x.Md5(data)
 		s.lastChecksum.needVerify = true
 
-		detail := fmt.Sprintf("index:%d, checksum:%s, data:%+v", index, s.lastChecksum.checksum, mcd)
-		s.Logger.Info(fmt.Sprintf("create checksum costs:%s detail:%s", time.Now().Sub(start), detail))
+		s.Logger.Debug(
+			fmt.Sprintf("create checksum costs:%s detail:%s",
+				time.Now().Sub(start),
+				fmt.Sprintf("index:%d, checksum:%s, data:%+v",
+					index, s.lastChecksum.checksum, mcd,
+				),
+			),
+		)
 	case internal.VerifyChecksumMsg:
 		start := time.Now()
 		var req internal.VerifyChecksum
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		if req.NodeID == s.ID {
-			s.Logger.Info("ignore checksum. self trigger this verify")
+			s.Logger.Warn("ignore checksum. self trigger this verify")
 			s.lastChecksum.needVerify = false
 			return nil
 		}
 
 		if s.lastChecksum.index == 0 {
 			//have no checksum only when restart
-			s.Logger.Info("ignore checksum. have no checksum", zap.Uint64("index", req.Index))
+			s.Logger.Warn("ignore checksum. have no checksum", zap.Uint64("index", req.Index))
 			return nil
 		}
 
 		if s.lastChecksum.index != req.Index {
-			s.Logger.Warn("ingore checksum", zap.Uint64("last index:", s.lastChecksum.index), zap.Uint64("index", req.Index))
+			s.Logger.Warn("ignore checksum", zap.Uint64("last index:", s.lastChecksum.index), zap.Uint64("index", req.Index))
 			return nil
 		}
 

@@ -415,26 +415,38 @@ func (s *Service) shardsResponse(w io.Writer, rp *meta.RetentionPolicyInfo, e er
 }
 
 func (s *Service) handleShard(conn net.Conn) (string, string, *meta.ShardInfo, error) {
-	var req GetShardRequest
-	if err := s.readRequest(conn, &req); err != nil {
-		return "", "", nil, err
+	var (
+		req       GetShardRequest
+		err       error
+		db, rp    string
+		groupInfo *meta.ShardGroupInfo
+	)
+	if err = s.readRequest(conn, &req); err != nil {
+		goto NOT_FOUND
 	}
 	if req.ShardID < 1 {
-		return "", "", nil, errors.New("ShardID should be specified")
+		err = errors.New("ShardID should be specified")
+		goto NOT_FOUND
 	}
-	db, rp, groupInfo := s.MetaClient.ShardOwner(req.ShardID)
+	db, rp, groupInfo = s.MetaClient.ShardOwner(req.ShardID)
+	fmt.Println("shardId:", req.ShardID, "=>", db, rp, groupInfo)
+	if db == "" || rp == "" || groupInfo == nil {
+		err = errors.New("Specified shard could not be found")
+		goto NOT_FOUND
+	}
 	for _, shard := range groupInfo.Shards {
 		if shard.ID == req.ShardID {
 			return db, rp, &shard, nil
 		}
 	}
-	return "", "", nil, errors.New("Specified shard could not be found")
+NOT_FOUND:
+	return "", "", nil, err
 }
 
 func (s *Service) shardResponse(w io.Writer, db, rp string, shard *meta.ShardInfo, e error) {
 	var resp ShardResponse
 	setError(&resp.CommonResp, e)
-	if e != nil {
+	if e == nil {
 		resp.ID = shard.ID
 		resp.DB = db
 		resp.Rp = rp

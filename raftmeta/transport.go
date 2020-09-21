@@ -309,9 +309,7 @@ func (s *RaftNode) HandleMessage(w http.ResponseWriter, r *http.Request) {
 	var msg raftpb.Message
 	err = msg.Unmarshal(data)
 	x.Check(err)
-	if msg.Type != raftpb.MsgHeartbeat && msg.Type != raftpb.MsgHeartbeatResp {
-		s.Logger.Info("recv message", zap.String("type", msg.Type.String()))
-	}
+	s.Logger.Debug("recv message", zap.String("type", msg.Type.String()))
 	s.RecvRaftRPC(context.Background(), msg)
 }
 
