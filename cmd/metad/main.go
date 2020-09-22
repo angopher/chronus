@@ -11,6 +11,7 @@ import (
 	"github.com/angopher/chronus/raftmeta"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
+	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/influxdata/influxdb/logger"
 	"github.com/influxdata/influxdb/services/meta"
 	"go.uber.org/zap"
@@ -47,6 +48,8 @@ func initialLogging(config *raftmeta.Config) (*zap.Logger, error) {
 func main() {
 	f := flag.NewFlagSet("metad", flag.ExitOnError)
 	configFile := f.String("config", "", "Specify config file")
+	dumpFile := f.String("dump", "", "Boot and dump the snapshot to a file specified")
+	restoreFile := f.String("restore", "", "Boot and restore data from the snapshot specified")
 	f.Parse(os.Args[1:])
 
 	config := raftmeta.NewConfig()
@@ -79,6 +82,34 @@ func main() {
 	node := raftmeta.NewRaftNode(config)
 	node.MetaCli = metaCli
 	node.WithLogger(log)
+
+	// dump only
+	if *dumpFile != "" {
+		err := node.Dump(*dumpFile)
+		if err != nil {
+			fmt.Println("Dump to file error:", err)
+			return
+		}
+		fmt.Println("Dumped to", *dumpFile)
+		return
+	}
+
+	// restore
+	if *restoreFile != "" {
+		// set conf state first
+		var ids []uint64
+		for _, n := range node.Config.Peers {
+			ids = append(ids, n.RaftId)
+		}
+		node.SetConfState(&raftpb.ConfState{
+			Nodes: ids,
+		})
+		err = node.Restore(*restoreFile)
+		if err != nil {
+			node.Logger.Warn("Restore from file failed", zap.Error(err))
+			return
+		}
+	}
 
 	t := raftmeta.NewTransport()
 	t.WithLogger(log)

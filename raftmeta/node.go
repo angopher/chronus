@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"sync"
@@ -227,6 +228,83 @@ func NewRaftNode(config Config) *RaftNode {
 		leaderChanged: make(chan struct{}),
 		lastChecksum:  Checksum{needVerify: false, index: 0, checksum: ""},
 	}
+}
+
+func (s *RaftNode) resetPeersInSnapshot(snapshot *raftpb.Snapshot) error {
+	var sndata internal.SnapshotData
+	err := json.Unmarshal(snapshot.Data, &sndata)
+	if err != nil {
+		return err
+	}
+	sndata.PeersAddr = make(map[uint64]string)
+	for _, p := range s.Config.Peers {
+		sndata.PeersAddr[p.RaftId] = p.Addr
+	}
+	snapshot.Data, err = json.Marshal(&sndata)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *RaftNode) Restore(filePath string) error {
+	f, err := os.OpenFile(filePath, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return err
+	}
+	s.Logger.Warn("Restore from snapfile", zap.String("file", filePath), zap.Int64("size", info.Size()))
+	snapdata := make([]byte, info.Size())
+	_, err = io.ReadFull(f, snapdata)
+	if err != nil {
+		return err
+	}
+	snapshot := raftpb.Snapshot{}
+	err = json.Unmarshal(snapdata, &snapshot)
+	if err != nil {
+		return err
+	}
+	s.Logger.Warn(fmt.Sprintf(
+		"Term=%d, Index=%d",
+		snapshot.Metadata.Term,
+		snapshot.Metadata.Index,
+	))
+	if s.RaftConfState == nil {
+		return errors.New("ConfState has not been set yet")
+	}
+	snapshot.Metadata.ConfState = *s.RaftConfState
+	s.Logger.Warn(fmt.Sprintf(
+		"Nodes=%v, Learners=%v",
+		snapshot.Metadata.ConfState.Nodes,
+		snapshot.Metadata.ConfState.Learners,
+	))
+	err = s.resetPeersInSnapshot(&snapshot)
+	if err != nil {
+		return err
+	}
+	return s.Storage.Save(raftpb.HardState{}, []raftpb.Entry{}, snapshot)
+}
+
+func (s *RaftNode) Dump(filePath string) error {
+	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sp, err := s.Storage.Snapshot()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(&sp)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	return err
 }
 
 func (s *RaftNode) WithLogger(log *zap.Logger) {
