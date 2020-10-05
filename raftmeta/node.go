@@ -195,7 +195,9 @@ func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
 	kvOpt.Dir = config.WalDir
 	kvOpt.ValueDir = config.WalDir
 	kvOpt.TableLoadingMode = options.MemoryMap
-	kvOpt.ValueLogFileSize = 64 << 20
+	kvOpt.ValueLogFileSize = 8 << 20
+	kvOpt.MaxTableSize = 8 << 20
+	kvOpt.NumLevelZeroTables = 2
 
 	walStore, err := badger.Open(kvOpt)
 	x.Checkf(err, "Error while creating badger KV WAL store")

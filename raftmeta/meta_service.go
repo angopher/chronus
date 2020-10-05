@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/angopher/chronus/raftmeta/internal"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/influxdata/influxdb/services/meta"
