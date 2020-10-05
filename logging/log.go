@@ -56,7 +56,7 @@ func createWriter(c *Config) io.Writer {
 	if c.Dir != "" {
 		dir := strings.TrimRight(c.Dir, string(filepath.Separator))
 		return &lumberjack.Logger{
-			Filename:   filepath.Join(dir, "metad.log"),
+			Filename:   filepath.Join(dir, c.FileName),
 			MaxSize:    100,
 			MaxBackups: 5,
 			Compress:   true,

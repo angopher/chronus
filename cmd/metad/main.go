@@ -39,9 +39,10 @@ func main() {
 		LoggingEnabled:      true,
 	})
 	log, err := logging.InitialLogging(&logging.Config{
-		Format: config.LogFormat,
-		Level:  config.LogLevel,
-		Dir:    config.LogDir,
+		Format:   config.LogFormat,
+		Level:    config.LogLevel,
+		Dir:      config.LogDir,
+		FileName: "metad.log",
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error to initialize logging", err)

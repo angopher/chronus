@@ -12,12 +12,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
+	"github.com/angopher/chronus/logging"
 	"github.com/influxdata/influxdb/logger"
 	"go.uber.org/zap"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 const logo = `
@@ -89,20 +88,14 @@ func (cmd *Command) Run(args ...string) error {
 		return fmt.Errorf("%s. To generate a valid configuration file run `influxd config > influxdb.generated.conf`", err)
 	}
 
-	if options.LogDir != "" {
-		dir := strings.TrimRight(options.LogDir, string(filepath.Separator))
-		cmd.Logger = logger.New(&lumberjack.Logger{
-			Filename:   filepath.Join(dir, "influxd.log"),
-			MaxSize:    100,
-			MaxBackups: 5,
-			Compress:   true,
-		})
-	} else {
-		cmd.Logger, _ = config.Logging.New(cmd.Stderr)
-	}
-	if cmd.Logger == nil {
-		// assign the default logger
-		cmd.Logger = logger.New(cmd.Stderr)
+	cmd.Logger, err = logging.InitialLogging(&logging.Config{
+		Format:   config.Logging.Format,
+		Level:    config.Logging.Level.String(),
+		Dir:      options.LogDir,
+		FileName: "influxd.log",
+	})
+	if err != nil {
+		return fmt.Errorf("%s. Initialize logging failed", err)
 	}
 
 	// Attempt to run pprof on :6060 before startup if debug pprof enabled.

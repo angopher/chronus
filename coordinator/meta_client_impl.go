@@ -19,6 +19,24 @@ import (
 	imeta "github.com/angopher/chronus/services/meta"
 )
 
+var (
+	client = http.Client{
+		Transport: &http.Transport{
+			Dial: func(netw, addr string) (net.Conn, error) {
+				c, err := net.DialTimeout(netw, addr, time.Second)
+				if err != nil {
+					return nil, err
+				}
+				return c, nil
+			},
+			MaxConnsPerHost:     500,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
+)
+
 type MetaClientImpl struct {
 	Addrs []string
 }
@@ -580,21 +598,6 @@ func RequestAndParseResponse(url string, data interface{}, resp interface{}) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Connection", "close")
-
-	client := http.Client{
-		Transport: &http.Transport{
-			Dial: func(netw, addr string) (net.Conn, error) {
-				deadline := time.Now().Add(10 * time.Second) //TODO: timeout from config
-				c, err := net.DialTimeout(netw, addr, time.Second)
-				if err != nil {
-					return nil, err
-				}
-				c.SetDeadline(deadline)
-				return c, nil
-			},
-		},
-	}
 
 	res, err := client.Do(req)
 	if err != nil {

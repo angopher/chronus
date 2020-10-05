@@ -141,7 +141,8 @@ type RaftNode struct {
 	Config Config
 
 	//用于存储raft日志和snapshot
-	Storage *raftwal.DiskStorage
+	Storage  *raftwal.DiskStorage
+	walStore *badger.DB
 
 	//节点之间的通信模块
 	Transport interface {
@@ -188,13 +189,13 @@ func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
 		Logger:          newRaftLoggerBridge(logger),
 	}
 
-	walDir := config.WalDir
-	x.Checkf(os.MkdirAll(walDir, 0700), "Error while creating WAL dir.")
+	x.Checkf(os.MkdirAll(config.WalDir, 0700), "Error while creating WAL dir.")
 	kvOpt := badger.DefaultOptions
 	kvOpt.SyncWrites = true
 	kvOpt.Dir = config.WalDir
 	kvOpt.ValueDir = config.WalDir
 	kvOpt.TableLoadingMode = options.MemoryMap
+	kvOpt.ValueLogFileSize = 64 << 20
 
 	walStore, err := badger.Open(kvOpt)
 	x.Checkf(err, "Error while creating badger KV WAL store")
@@ -221,6 +222,7 @@ func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
 		Config:        config,
 		RaftCtx:       rc,
 		Storage:       storage,
+		walStore:      walStore,
 		Done:          make(chan struct{}),
 		props:         newProposals(),
 		rand:          rand.New(&lockedSource{src: rand.NewSource(time.Now().UnixNano())}),
@@ -375,6 +377,20 @@ func (s *RaftNode) resetPeersFromConfig() {
 	}
 }
 
+func (s *RaftNode) reclaimDiskSpace() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.walStore.RunValueLogGC(0.1)
+		case <-s.Done:
+			return
+		}
+	}
+}
+
 func (s *RaftNode) InitAndStartNode() {
 	peers := make([]raft.Peer, 0, len(s.Config.Peers))
 	for _, p := range s.Config.Peers {
@@ -438,6 +454,8 @@ func (s *RaftNode) Run() {
 
 	t := time.NewTicker(time.Duration(s.Config.TickTimeMs) * time.Millisecond)
 	defer t.Stop()
+
+	go s.reclaimDiskSpace()
 
 	var leader uint64
 
