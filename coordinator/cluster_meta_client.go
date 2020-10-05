@@ -100,10 +100,9 @@ func (me *ClusterMetaClient) syncLoop() {
 }
 
 func (me *ClusterMetaClient) Start() {
+	// sync first synchronously
 	wait := me.WaitForDataChanged()
-	//sync data first and will signal changes
-	me.syncData()
-	go me.syncLoop()
+	go me.syncData()
 	//wait sync meta data from meta server
 	select {
 	case <-time.After(5 * time.Second):
@@ -111,6 +110,7 @@ func (me *ClusterMetaClient) Start() {
 		panic("sync meta data failed")
 	case <-wait:
 	}
+	go me.syncLoop()
 }
 
 func (me *ClusterMetaClient) CreateDatabase(name string) (*meta.DatabaseInfo, error) {

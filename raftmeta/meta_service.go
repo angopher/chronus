@@ -107,18 +107,7 @@ func (s *MetaService) ProposeAndWait(msgType int, data []byte, retData interface
 	pr := &internal.Proposal{Type: msgType}
 	pr.Data = data
 
-	resCh := make(chan error)
-	go func() {
-		err := s.Node.ProposeAndWait(ctx, pr, retData)
-		resCh <- err
-	}()
-
-	var err error
-	select {
-	case err = <-resCh:
-	}
-
-	return err
+	return s.Node.ProposeAndWait(ctx, pr, retData)
 }
 
 type CreateDatabaseReq struct {
@@ -1413,7 +1402,7 @@ type PingResp struct {
 
 func (s *MetaService) Ping(w http.ResponseWriter, r *http.Request) {
 	resp := new(PingResp)
-	resp.Index = s.cli.Data().Index
+	resp.Index = s.cli.DataIndex()
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
 	WriteResp(w, &resp)

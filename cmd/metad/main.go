@@ -4,46 +4,17 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/angopher/chronus/logging"
 	"github.com/angopher/chronus/raftmeta"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
 	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/influxdata/influxdb/logger"
+	"github.com/dgraph-io/badger"
 	"github.com/influxdata/influxdb/services/meta"
 	"go.uber.org/zap"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
-
-func initialLogging(config *raftmeta.Config) (*zap.Logger, error) {
-	cfg := logger.NewConfig()
-	switch strings.ToLower(config.LogLevel) {
-	case "info":
-		cfg.Level = zap.InfoLevel
-	case "warn", "warning":
-		cfg.Level = zap.WarnLevel
-	case "debug":
-		cfg.Level = zap.DebugLevel
-	case "fatal":
-		cfg.Level = zap.FatalLevel
-	case "panic":
-		cfg.Level = zap.PanicLevel
-	}
-	if config.LogDir != "" {
-		dir := strings.TrimRight(config.LogDir, string(filepath.Separator))
-		return cfg.New(&lumberjack.Logger{
-			Filename:   filepath.Join(dir, "metad.log"),
-			MaxSize:    100,
-			MaxBackups: 5,
-			Compress:   true,
-		})
-	} else {
-		return cfg.New(os.Stderr)
-	}
-}
 
 func main() {
 	f := flag.NewFlagSet("metad", flag.ExitOnError)
@@ -63,25 +34,30 @@ func main() {
 		return
 	}
 
-	fmt.Printf("config:%+v\n", config)
-
 	metaCli := imeta.NewClient(&meta.Config{
 		RetentionAutoCreate: config.RetentionAutoCreate,
 		LoggingEnabled:      true,
 	})
-	log, err := initialLogging(&config)
+	log, err := logging.InitialLogging(&logging.Config{
+		Format: config.LogFormat,
+		Level:  config.LogLevel,
+		Dir:    config.LogDir,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error to initialize logging", err)
 		return
 	}
+	badger.SetLogger(raftmeta.NewBadgerLoggerBridge(log))
+
+	suger := log.Sugar()
+	suger.Debug("config: %+v", config)
 
 	metaCli.WithLogger(log)
 	err = metaCli.Open()
 	x.Check(err)
 
-	node := raftmeta.NewRaftNode(config)
+	node := raftmeta.NewRaftNode(config, log)
 	node.MetaCli = metaCli
-	node.WithLogger(log)
 
 	// dump only
 	if *dumpFile != "" {

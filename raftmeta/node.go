@@ -178,13 +178,14 @@ type RaftNode struct {
 	Logger *zap.Logger
 }
 
-func NewRaftNode(config Config) *RaftNode {
+func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
 	c := &raft.Config{
 		ID:              config.RaftId,
 		ElectionTick:    config.ElectionTick,
 		HeartbeatTick:   config.HeartbeatTick,
 		MaxSizePerMsg:   config.MaxSizePerMsg,
 		MaxInflightMsgs: config.MaxInflightMsgs,
+		Logger:          newRaftLoggerBridge(logger),
 	}
 
 	walDir := config.WalDir
@@ -216,6 +217,7 @@ func NewRaftNode(config Config) *RaftNode {
 		leases:        meta.NewLeases(meta.DefaultLeaseDuration),
 		ID:            c.ID,
 		RaftConfig:    c,
+		Logger:        logger.With(zap.String("raftmeta", "RaftNode")),
 		Config:        config,
 		RaftCtx:       rc,
 		Storage:       storage,
@@ -305,10 +307,6 @@ func (s *RaftNode) Dump(filePath string) error {
 	}
 	_, err = f.Write(data)
 	return err
-}
-
-func (s *RaftNode) WithLogger(log *zap.Logger) {
-	s.Logger = log.With(zap.String("raftmeta", "RaftNode"))
 }
 
 // uniqueKey is meant to be unique across all the replicas.
@@ -515,7 +513,7 @@ func (s *RaftNode) Run() {
 
 //TODO:optimize
 func (s *RaftNode) triggerChecksum() {
-	s.Logger.Info("trigger check sum")
+	s.Logger.Info("trigger checksum")
 
 	if s.lastChecksum.needVerify {
 		go func() {
@@ -647,12 +645,15 @@ func (s *RaftNode) ProposeConfChange(ctx context.Context, cc raftpb.ConfChange) 
 }
 
 func (s *RaftNode) ProposeAndWait(ctx context.Context, proposal *internal.Proposal, retData interface{}) error {
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	che := make(chan error, 1)
+	if _, ok := ctx.Deadline(); !ok {
+		// introduce timeout if needed
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 	pctx := &proposalCtx{
-		ch:      che,
-		ctx:     cctx,
+		ch:      make(chan error, 1),
+		ctx:     ctx,
 		retData: retData,
 	}
 	key := s.uniqueKey()
@@ -667,7 +668,7 @@ func (s *RaftNode) ProposeAndWait(ctx context.Context, proposal *internal.Propos
 	data, err := json.Marshal(proposal)
 	x.Check(err)
 
-	if err = s.Propose(cctx, data); err != nil {
+	if err = s.Propose(ctx, data); err != nil {
 		return x.Wrapf(err, "While proposing")
 	}
 
@@ -676,22 +677,21 @@ func (s *RaftNode) ProposeAndWait(ctx context.Context, proposal *internal.Propos
 	}
 
 	select {
-	case err = <-che:
+	case err = <-pctx.ch:
 		// We arrived here by a call to n.props.Done().
 		if tr, ok := trace.FromContext(ctx); ok {
 			tr.LazyPrintf("Done with error: %v", err)
 		}
 		return err
 	case <-ctx.Done():
-		if tr, ok := trace.FromContext(ctx); ok {
-			tr.LazyPrintf("External context timed out with error: %v.", ctx.Err())
+		if ctx.Err() == context.DeadlineExceeded {
+			if tr, ok := trace.FromContext(ctx); ok {
+				tr.LazyPrintf("Propose timed out.")
+			}
+			return errInternalRetry
 		}
+
 		return ctx.Err()
-	case <-cctx.Done():
-		if tr, ok := trace.FromContext(ctx); ok {
-			tr.LazyPrintf("Internal context timed out with error: %v. Retrying...", cctx.Err())
-		}
-		return errInternalRetry
 	}
 }
 

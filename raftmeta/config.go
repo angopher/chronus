@@ -39,8 +39,9 @@ type Config struct {
 	ChecksumIntervalSec int    `toml:"checksum-interval"`
 	RetentionAutoCreate bool   `toml:"retention-auto-create"`
 
-	LogLevel string `toml:"log-level"`
-	LogDir   string `toml:"log-dir"`
+	LogFormat string `toml:"log-format"`
+	LogLevel  string `toml:"log-level"`
+	LogDir    string `toml:"log-dir"`
 }
 
 type Peer struct {

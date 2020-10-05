@@ -20,6 +20,7 @@ require (
 	github.com/influxdata/platform v0.0.0-20190117200541-d500d3cf5589
 	github.com/influxdata/roaring v0.4.12 // indirect
 	github.com/influxdata/usage-client v0.0.0-20160829180054-6d3895376368
+	github.com/jsternberg/zap-logfmt v1.2.0
 	github.com/klauspost/compress v1.4.1 // indirect
 	github.com/klauspost/cpuid v1.2.0 // indirect
 	github.com/klauspost/pgzip v1.2.1 // indirect

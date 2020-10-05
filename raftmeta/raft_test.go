@@ -126,10 +126,9 @@ func newService(config raftmeta.Config, t *fakeTransport, cb func(proposal *inte
 	x.Check(err)
 	log := logger.New(os.Stderr)
 
-	node := raftmeta.NewRaftNode(config)
+	node := raftmeta.NewRaftNode(config, log)
 	node.MetaCli = metaCli
 	node.ApplyCallBack = cb
-	node.WithLogger(log)
 
 	node.Transport = t
 	node.InitAndStartNode()

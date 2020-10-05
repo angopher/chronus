@@ -8,17 +8,13 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/influxdata/influxdb"
 	"github.com/influxdata/influxdb/logger"
-	"github.com/influxdata/influxdb/pkg/file"
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
@@ -197,11 +193,12 @@ func (c *Client) DataNodeByTCPHost(tcpAddr string) (*meta.NodeInfo, error) {
 func (c *Client) DeleteDataNode(id uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	err := c.cacheData.DeleteDataNode(id)
+	data := c.cacheData.Clone()
+	err := data.DeleteDataNode(id)
 	if err != nil {
 		return err
 	}
-	if err := c.commit(c.cacheData); err != nil {
+	if err := c.commit(data); err != nil {
 		return err
 	}
 	return nil
@@ -1044,19 +1041,14 @@ func (c *Client) DropSubscription(database, rp, name string) error {
 // SetData overwrites the underlying data in the meta store.
 func (c *Client) SetData(data *Data) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	// reset the index so the commit will fire a change event
 	c.cacheData.Index = 0
 
-	// increment the index to force the changed channel to fire
-	d := data.Clone()
-	d.Index++
-
-	if err := c.commit(d); err != nil {
+	if err := c.commit(data.Clone()); err != nil {
 		return err
 	}
-
-	c.mu.Unlock()
 
 	return nil
 }
@@ -1136,63 +1128,13 @@ func (c *Client) WithLogger(log *zap.Logger) {
 
 // snapshot saves the current meta data to disk.
 func snapshot(path string, data *Data) error {
-	//TODO: no need write snapshot to disk
+	// no need write snapshot to disk
 	return nil
-	filename := filepath.Join(path, META_FILE)
-	tmpFile := filename + "tmp"
-
-	f, err := os.Create(tmpFile)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	var d []byte
-	if b, err := data.MarshalBinary(); err != nil {
-		return err
-	} else {
-		d = b
-	}
-
-	if _, err := f.Write(d); err != nil {
-		return err
-	}
-
-	if err = f.Sync(); err != nil {
-		return err
-	}
-
-	//close file handle before renaming to support Windows
-	if err = f.Close(); err != nil {
-		return err
-	}
-
-	return file.RenameFile(tmpFile, filename)
 }
 
 // Load loads the current meta data from disk.
 func (c *Client) Load() error {
-	//TODO:no need load
-	return nil
-	file := filepath.Join(c.path, META_FILE)
-
-	f, err := os.Open(file)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer f.Close()
-
-	data, err := ioutil.ReadAll(f)
-	if err != nil {
-		return err
-	}
-
-	if err := c.cacheData.UnmarshalBinary(data); err != nil {
-		return err
-	}
+	// no need load
 	return nil
 }
 

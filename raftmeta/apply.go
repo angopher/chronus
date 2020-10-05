@@ -346,7 +346,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		if req.NodeID == s.ID {
-			s.Logger.Warn("ignore checksum. self trigger this verify")
+			s.Logger.Debug("ignore checksum. self trigger this verify")
 			s.lastChecksum.needVerify = false
 			return nil
 		}
