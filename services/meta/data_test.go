@@ -205,3 +205,63 @@ func TestDeleteDataNode(t *testing.T) {
 	o := owners[0]
 	assert.Equal(t, id2, o.NodeID)
 }
+
+func TestFreezeDataNode(t *testing.T) {
+	data := newData()
+	id1, id2 := initialTwoDataNodes(data)
+	replicaN := 2
+	name := "testdb"
+	policy := "rp"
+	duration := time.Hour
+	data.CreateDatabase(name)
+	spec := meta.RetentionPolicySpec{
+		Name:               policy,
+		ReplicaN:           &replicaN,
+		Duration:           &duration,
+		ShardGroupDuration: time.Minute,
+	}
+	data.CreateRetentionPolicy(name, spec.NewRetentionPolicyInfo(), true)
+	data.CreateShardGroup(name, policy, time.Now())
+	sg, err := data.ShardGroups(name, policy)
+	assert.Nil(t, err)
+	assert.Equal(t, 1, len(sg))
+	assert.Equal(t, 2, len(sg[0].Shards[0].Owners))
+
+	assert.Equal(t, 0, len(data.FreezedDataNodes))
+
+	assert.NotNil(t, data.FreezeDataNode(3333))
+	assert.Nil(t, data.FreezeDataNode(id1))
+	assert.Nil(t, data.FreezeDataNode(id2))
+	assert.Equal(t, []uint64{id1, id2}, data.FreezedDataNodes)
+	assert.True(t, data.IsFreezeDataNode(id1))
+	assert.True(t, data.IsFreezeDataNode(id2))
+
+	assert.Nil(t, data.UnfreezeDataNode(id2))
+	assert.Equal(t, []uint64{id1}, data.FreezedDataNodes)
+
+	assert.Nil(t, data.UnfreezeDataNode(id1))
+	assert.Equal(t, []uint64{}, data.FreezedDataNodes)
+	assert.Nil(t, data.FreezeDataNode(id1))
+	assert.NotNil(t, data.FreezeDataNode(id1))
+	assert.Equal(t, []uint64{id1}, data.FreezedDataNodes)
+	data.CreateShardGroup(name, policy, time.Now().Add(time.Hour))
+	sg, err = data.ShardGroups(name, policy)
+	assert.Nil(t, err)
+	assert.Equal(t, 2, len(sg))
+	assert.Equal(t, 1, len(sg[1].Shards[0].Owners))
+
+	// try delete freezed node
+	data.DeleteDataNode(1)
+	assert.Equal(t, []uint64{}, data.FreezedDataNodes)
+}
+
+func TestClone(t *testing.T) {
+	data1 := newData()
+	id1, id2 := initialTwoDataNodes(data1)
+	data2 := data1.Clone()
+	data1.FreezeDataNode(id1)
+	data2.FreezeDataNode(id2)
+	assert.Equal(t, 1, len(data1.FreezedDataNodes))
+	assert.Equal(t, 1, len(data2.FreezedDataNodes))
+	assert.NotEqual(t, data1.FreezedDataNodes, data2.FreezedDataNodes)
+}

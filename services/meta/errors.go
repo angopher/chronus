@@ -11,6 +11,12 @@ var (
 	// ErrNodeNotFound is returned when mutating a node that doesn't exist.
 	ErrNodeNotFound = errors.New("node not found")
 
+	// ErrNodeAlreadyFreezed represents node has been already freezed
+	ErrNodeAlreadyFreezed = errors.New("node has been freezed before")
+
+	// ErrNodeNotFreezed represents node is not freezed (is normal)
+	ErrNodeNotFreezed = errors.New("node hasn't been freezed")
+
 	// ErrNodesRequired is returned when at least one node is required for an operation.
 	// This occurs when creating a shard group.
 	ErrNodesRequired = errors.New("at least one node required")

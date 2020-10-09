@@ -2,6 +2,7 @@ package meta
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -14,8 +15,9 @@ import (
 // Data represents the top level collection of all metadata.
 type Data struct {
 	meta.Data
-	MetaNodes []meta.NodeInfo
-	DataNodes []meta.NodeInfo
+	MetaNodes        []meta.NodeInfo
+	DataNodes        []meta.NodeInfo
+	FreezedDataNodes []uint64 // data nodes that can't create new shard on
 
 	MaxNodeID uint64
 }
@@ -66,6 +68,65 @@ func (data *Data) CreateDataNode(host, tcpHost string) (uint64, error) {
 	sort.Sort(meta.NodeInfos(data.DataNodes))
 
 	return existingID, nil
+}
+
+func existInNodes(nodes []meta.NodeInfo, id uint64) *meta.NodeInfo {
+	for _, n := range nodes {
+		if n.ID == id {
+			return &n
+		}
+	}
+	return nil
+}
+
+func getFreezed(freezed []uint64, id uint64) int {
+	for i, n := range freezed {
+		if n == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (data *Data) UnfreezeDataNode(id uint64) error {
+	if id == 0 {
+		return ErrNodeIDRequired
+	}
+
+	if existInNodes(data.DataNodes, id) == nil {
+		return ErrNodeNotFound
+	}
+
+	i := getFreezed(data.FreezedDataNodes, id)
+	if i == -1 {
+		return ErrNodeNotFreezed
+	}
+
+	data.FreezedDataNodes = append(data.FreezedDataNodes[:i], data.FreezedDataNodes[i+1:]...)
+
+	return nil
+}
+
+func (data *Data) IsFreezeDataNode(id uint64) bool {
+	return getFreezed(data.FreezedDataNodes, id) > -1
+}
+
+func (data *Data) FreezeDataNode(id uint64) error {
+	if id == 0 {
+		return ErrNodeIDRequired
+	}
+
+	if existInNodes(data.DataNodes, id) == nil {
+		return ErrNodeNotFound
+	}
+
+	if getFreezed(data.FreezedDataNodes, id) > -1 {
+		return ErrNodeAlreadyFreezed
+	}
+
+	data.FreezedDataNodes = append(data.FreezedDataNodes, id)
+
+	return nil
 }
 
 // DeleteDataNode removes a node from the Meta store.
@@ -159,10 +220,16 @@ func (data *Data) DeleteDataNode(id uint64) error {
 			}
 		}
 	}
+
+	// Delete from freezed nodes if necessarily
+	if i := getFreezed(data.FreezedDataNodes, id); i > -1 {
+		data.FreezedDataNodes = append(data.FreezedDataNodes[:i], data.FreezedDataNodes[i+1:]...)
+	}
+
 	return nil
 }
 
-func (data *Data) CloneNodes(src []meta.NodeInfo) []meta.NodeInfo {
+func cloneNodes(src []meta.NodeInfo) []meta.NodeInfo {
 	if len(src) == 0 {
 		return []meta.NodeInfo{}
 	}
@@ -278,8 +345,10 @@ func (data *Data) Clone() *Data {
 
 	other.Databases = data.CloneDatabases()
 	other.Users = data.CloneUsers()
-	other.DataNodes = data.CloneNodes(data.DataNodes)
-	other.MetaNodes = data.CloneNodes(data.MetaNodes)
+	other.DataNodes = cloneNodes(data.DataNodes)
+	other.MetaNodes = cloneNodes(data.MetaNodes)
+	other.FreezedDataNodes = make([]uint64, len(data.FreezedDataNodes))
+	copy(other.FreezedDataNodes, data.FreezedDataNodes)
 
 	return &other
 }
@@ -350,18 +419,34 @@ func (data *Data) CreateShardGroup(database, policy string, timestamp time.Time)
 		return nil
 	}
 
+	// Don't create shard on freezed nodes
+	availableNodes := make([]meta.NodeInfo, 0, len(data.DataNodes))
+	freezedNodes := make(map[uint64]bool)
+	for _, n := range data.FreezedDataNodes {
+		freezedNodes[n] = true
+	}
+	for _, n := range data.DataNodes {
+		if freezedNodes[n.ID] {
+			continue
+		}
+		availableNodes = append(availableNodes, n)
+	}
+
 	// Require at least one replica but no more replicas than nodes.
 	replicaN := rpi.ReplicaN
 	if replicaN == 0 {
 		replicaN = 1
-	} else if replicaN > len(data.DataNodes) {
-		replicaN = len(data.DataNodes)
+	} else if replicaN > len(availableNodes) {
+		replicaN = len(availableNodes)
+	}
+	if replicaN < 1 {
+		return errors.New("No replica can be assigned")
 	}
 
 	// Determine shard count by node count divided by replication factor.
 	// This will ensure nodes will get distributed across nodes evenly and
 	// replicated the correct number of times.
-	shardN := len(data.DataNodes) / replicaN
+	shardN := len(availableNodes) / replicaN
 
 	// Create the shard group.
 	data.MaxShardGroupID++
@@ -383,11 +468,11 @@ func (data *Data) CreateShardGroup(database, policy string, timestamp time.Time)
 
 	// Assign data nodes to shards via round robin.
 	// Start from a repeatably "random" place in the node list.
-	nodeIndex := int(data.Index % uint64(len(data.DataNodes)))
+	nodeIndex := int(data.Index % uint64(len(availableNodes)))
 	for i := range sgi.Shards {
 		si := &sgi.Shards[i]
 		for j := 0; j < replicaN; j++ {
-			nodeID := data.DataNodes[nodeIndex%len(data.DataNodes)].ID
+			nodeID := availableNodes[nodeIndex%len(availableNodes)].ID
 			si.Owners = append(si.Owners, meta.ShardOwner{NodeID: nodeID})
 			nodeIndex++
 		}
