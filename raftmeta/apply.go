@@ -363,7 +363,10 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		}
 
 		s.Logger.Info("checksum", zap.Uint64("index", req.Index), zap.String("checksum", s.lastChecksum.checksum))
-		x.AssertTruef(s.lastChecksum.checksum == req.Checksum, "verify checksum fail")
+		x.AssertTruef(s.lastChecksum.checksum == req.Checksum, "verify checksum fail, %s != %s, data=%+v",
+			s.lastChecksum.checksum, req.Checksum,
+			s.MetaCli.Data(),
+		)
 		s.Logger.Info(fmt.Sprintf("verify checksum success. costs %s", time.Now().Sub(start)))
 	default:
 		return fmt.Errorf("Unkown msg type:%d", proposal.Type)
