@@ -77,7 +77,7 @@ func main() {
 			ids = append(ids, n.RaftId)
 		}
 		node.SetConfState(&raftpb.ConfState{
-			Nodes: ids,
+			Voters: ids,
 		})
 		err = node.Restore(*restoreFile)
 		if err != nil {

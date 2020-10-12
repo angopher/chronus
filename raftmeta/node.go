@@ -287,8 +287,8 @@ func (s *RaftNode) Restore(filePath string) error {
 	}
 	snapshot.Metadata.ConfState = *s.RaftConfState
 	s.Logger.Warn(fmt.Sprintf(
-		"Nodes=%v, Learners=%v",
-		snapshot.Metadata.ConfState.Nodes,
+		"Voters=%v, Learners=%v",
+		snapshot.Metadata.ConfState.Voters,
 		snapshot.Metadata.ConfState.Learners,
 	))
 	err = s.resetPeersInSnapshot(&snapshot)
