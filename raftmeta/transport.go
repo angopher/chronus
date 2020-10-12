@@ -15,8 +15,8 @@ import (
 
 	"github.com/angopher/chronus/raftmeta/internal"
 	"github.com/angopher/chronus/x"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 )

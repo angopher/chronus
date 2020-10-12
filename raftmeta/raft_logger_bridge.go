@@ -3,7 +3,7 @@ package raftmeta
 import (
 	"fmt"
 
-	"github.com/coreos/etcd/raft"
+	"go.etcd.io/etcd/raft"
 	"go.uber.org/zap"
 )
 

@@ -7,10 +7,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/influxdata/influxdb/logger"
 	"github.com/influxdata/influxdb/services/meta"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
 
 	"github.com/angopher/chronus/raftmeta"
 	"github.com/angopher/chronus/raftmeta/internal"

@@ -10,9 +10,8 @@ import (
 	"github.com/angopher/chronus/raftmeta"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
-	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/dgraph-io/badger"
 	"github.com/influxdata/influxdb/services/meta"
+	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 )
 
@@ -48,7 +47,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Error to initialize logging", err)
 		return
 	}
-	badger.SetLogger(raftmeta.NewBadgerLoggerBridge(log))
 
 	suger := log.Sugar()
 	suger.Debug("config: %+v", config)

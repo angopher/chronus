@@ -1,7 +1,7 @@
 package internal
 
 import (
-	"github.com/coreos/etcd/raft/raftpb"
+	"go.etcd.io/etcd/raft/raftpb"
 )
 
 const (

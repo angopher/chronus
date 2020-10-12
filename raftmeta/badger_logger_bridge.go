@@ -3,7 +3,7 @@ package raftmeta
 import (
 	"strings"
 
-	"github.com/dgraph-io/badger"
+	"github.com/dgraph-io/badger/v2"
 	"go.uber.org/zap"
 )
 
@@ -28,4 +28,8 @@ func (b *badgerLoggerBridge) Infof(format string, args ...interface{}) {
 
 func (b *badgerLoggerBridge) Warningf(format string, args ...interface{}) {
 	b.suger.Warnf(strings.Trim(format, "\n"), args)
+}
+
+func (b *badgerLoggerBridge) Debugf(format string, args ...interface{}) {
+	b.suger.Debugf(strings.Trim(format, "\n"), args)
 }

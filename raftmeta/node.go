@@ -15,13 +15,13 @@ import (
 	"github.com/angopher/chronus/raftmeta/internal"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
-	"github.com/coreos/etcd/pkg/wait"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/dgraph-io/badger"
-	"github.com/dgraph-io/badger/options"
+	"github.com/dgraph-io/badger/v2"
+	"github.com/dgraph-io/badger/v2/options"
 	"github.com/dgraph-io/dgraph/raftwal"
 	"github.com/influxdata/influxdb/services/meta"
+	"go.etcd.io/etcd/pkg/wait"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
 	"go.uber.org/zap"
 	"golang.org/x/net/trace"
 )
@@ -190,10 +190,9 @@ func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
 	}
 
 	x.Checkf(os.MkdirAll(config.WalDir, 0700), "Error while creating WAL dir.")
-	kvOpt := badger.DefaultOptions
+	kvOpt := badger.DefaultOptions(config.WalDir)
 	kvOpt.SyncWrites = true
-	kvOpt.Dir = config.WalDir
-	kvOpt.ValueDir = config.WalDir
+	kvOpt.Logger = NewBadgerLoggerBridge(logger)
 	kvOpt.TableLoadingMode = options.MemoryMap
 	kvOpt.ValueLogFileSize = 8 << 20
 	kvOpt.MaxTableSize = 8 << 20

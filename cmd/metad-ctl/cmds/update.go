@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 
 	"github.com/angopher/chronus/cmd/metad-ctl/util"
 	"github.com/fatih/color"
@@ -72,7 +71,6 @@ func clusterAdd(ctx *cli.Context) (err error) {
 	return nil
 
 ERR:
-	fmt.Fprint(os.Stderr, "ERR: ", err.Error(), "\n\n")
 	return err
 }
 
@@ -107,7 +105,6 @@ func clusterUpdate(ctx *cli.Context) (err error) {
 	return nil
 
 ERR:
-	fmt.Fprint(os.Stderr, "ERR: ", err.Error(), "\n\n")
 	return err
 }
 
@@ -142,6 +139,5 @@ func clusterRemove(ctx *cli.Context) (err error) {
 	return nil
 
 ERR:
-	fmt.Fprint(os.Stderr, "ERR: ", err.Error(), "\n\n")
 	return err
 }
