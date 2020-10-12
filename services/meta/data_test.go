@@ -261,7 +261,9 @@ func TestClone(t *testing.T) {
 	data2 := data1.Clone()
 	data1.FreezeDataNode(id1)
 	data2.FreezeDataNode(id2)
+	data3 := data1.Clone()
 	assert.Equal(t, 1, len(data1.FreezedDataNodes))
 	assert.Equal(t, 1, len(data2.FreezedDataNodes))
 	assert.NotEqual(t, data1.FreezedDataNodes, data2.FreezedDataNodes)
+	assert.Equal(t, data3.FreezedDataNodes, data1.FreezedDataNodes)
 }

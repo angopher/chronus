@@ -36,6 +36,7 @@ const (
 	VerifyChecksumMsg                 = 29
 	AddShardOwner                     = 30
 	RemoveShardOwner                  = 31
+	FreezeDataNode                    = 32
 )
 
 var MessageTypeName = map[int]string{
@@ -70,6 +71,7 @@ var MessageTypeName = map[int]string{
 	29: "VerifyChecksumMsg",
 	30: "AddShardOwner",
 	31: "RemoveShardOwner",
+	32: "FreezeDataNode",
 }
 
 type Proposal struct {

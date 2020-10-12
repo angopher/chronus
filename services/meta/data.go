@@ -158,7 +158,7 @@ func (data *Data) DeleteDataNode(id uint64) error {
 		for ri, rp := range d.RetentionPolicies {
 			for sgi, sg := range rp.ShardGroups {
 				var (
-					nodeOwnerFreqs = make(map[int]int)
+					nodeOwnerFreqs = make(map[uint64]int)
 					orphanedShards []meta.ShardInfo
 				)
 				// Look through all shards in the shard group and
@@ -174,7 +174,7 @@ func (data *Data) DeleteDataNode(id uint64) error {
 						if owner.NodeID == id {
 							nodeIdx = i
 						}
-						nodeOwnerFreqs[int(owner.NodeID)]++
+						nodeOwnerFreqs[owner.NodeID]++
 					}
 
 					if nodeIdx > -1 {
@@ -200,18 +200,19 @@ func (data *Data) DeleteDataNode(id uint64) error {
 
 				// Reassign any orphaned shards. Delete the node we're
 				// dropping from the list of potential new owners.
-				delete(nodeOwnerFreqs, int(id))
+				delete(nodeOwnerFreqs, id)
 
 				for _, orphan := range orphanedShards {
-					newOwnerID, err := newShardOwner(orphan, nodeOwnerFreqs)
-					if err != nil {
-						return err
+					newOwnerID := newShardOwner(nodeOwnerFreqs)
+					if newOwnerID == 0 {
+						return errors.New(fmt.Sprint("No node can be reassigned to ", orphan.ID))
 					}
 
 					for si, s := range sg.Shards {
 						if s.ID == orphan.ID {
 							sg.Shards[si].Owners = append(sg.Shards[si].Owners, meta.ShardOwner{NodeID: newOwnerID})
 							data.Databases[di].RetentionPolicies[ri].ShardGroups[sgi].Shards = sg.Shards
+							nodeOwnerFreqs[newOwnerID]++
 							break
 						}
 					}
@@ -245,26 +246,29 @@ func cloneNodes(src []meta.NodeInfo) []meta.NodeInfo {
 // that currently owns the fewest number of shards. If multiple nodes
 // own the same (fewest) number of shards, then one of those nodes
 // becomes the new shard owner.
-func newShardOwner(s meta.ShardInfo, ownerFreqs map[int]int) (uint64, error) {
-	var (
-		minId   = -1
-		minFreq int
-	)
+// ATTENTION: This method should guarantee that the result is stable between
+//	different metad instances.
+func newShardOwner(freqs map[uint64]int) uint64 {
+	if len(freqs) < 1 {
+		return 0
+	}
 
-	for id, freq := range ownerFreqs {
-		if minId == -1 || freq < minFreq {
-			minId, minFreq = int(id), freq
+	type item struct {
+		id   uint64
+		freq int
+	}
+	arr := make([]item, 0, len(freqs))
+	for id, freq := range freqs {
+		arr = append(arr, item{id, freq})
+	}
+	sort.Slice(arr, func(i, j int) bool {
+		if arr[i].freq != arr[j].freq {
+			return arr[i].freq < arr[j].freq
 		}
-	}
+		return arr[i].id < arr[j].id
+	})
 
-	if minId < 0 {
-		return 0, fmt.Errorf("cannot reassign shard %d due to lack of data nodes", s.ID)
-	}
-
-	// Update the shard owner frequencies and set the new owner on the
-	// shard.
-	ownerFreqs[minId]++
-	return uint64(minId), nil
+	return arr[0].id
 }
 
 // MetaNode returns a node by id.
@@ -354,10 +358,11 @@ func (data *Data) Clone() *Data {
 }
 
 type DataJson struct {
-	Data      []byte
-	MetaNodes []meta.NodeInfo
-	DataNodes []meta.NodeInfo
-	MaxNodeID uint64
+	Data             []byte
+	MetaNodes        []meta.NodeInfo
+	DataNodes        []meta.NodeInfo
+	MaxNodeID        uint64
+	FreezedDataNodes []uint64
 }
 
 func (data *Data) marshal() ([]byte, error) {
@@ -365,6 +370,7 @@ func (data *Data) marshal() ([]byte, error) {
 	js.MetaNodes = data.MetaNodes
 	js.DataNodes = data.DataNodes
 	js.MaxNodeID = data.MaxNodeID
+	js.FreezedDataNodes = data.FreezedDataNodes
 	var err error
 	js.Data, err = data.Data.MarshalBinary()
 	if err != nil {
@@ -385,6 +391,7 @@ func (data *Data) unmarshal(buf []byte) error {
 	data.MetaNodes = js.MetaNodes
 	data.DataNodes = js.DataNodes
 	data.MaxNodeID = js.MaxNodeID
+	data.FreezedDataNodes = js.FreezedDataNodes
 	return data.Data.UnmarshalBinary(js.Data)
 }
 

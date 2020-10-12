@@ -7,6 +7,7 @@ const (
 	CREATE_DATA_NODE_PATH                      = "/create_data_node"
 	DROP_RETENTION_POLICY_PATH                 = "/drop_retention_policy"
 	DELETE_DATA_NODE_PATH                      = "/delete_data_node"
+	FREEZE_DATA_NODE_PATH                      = "/freeze_data_node"
 	CREATE_RETENTION_POLICY_PATH               = "/create_retention_policy"
 	UPDATE_RETENTION_POLICY_PATH               = "/update_retention_policy"
 	CREATE_USER_PATH                           = "/create_user"

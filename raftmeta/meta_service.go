@@ -380,7 +380,7 @@ func (s *MetaService) DeleteDataNode(w http.ResponseWriter, r *http.Request) {
 
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("DeleteDataNode ok", zap.Uint64("id", req.Id))
+	s.Logger.Info(fmt.Sprintf("DeleteDataNode ok, id=%d", req.Id))
 }
 
 type RetentionPolicySpec struct {
@@ -1397,6 +1397,46 @@ func (s *MetaService) Data(w http.ResponseWriter, r *http.Request) {
 	resp.RetMsg = "ok"
 }
 
+type FreezeDataNodeReq struct {
+	Id     uint64
+	Freeze bool
+}
+type FreezeDataNodeResp struct {
+	CommonResp
+}
+
+func (s *MetaService) FreezeDataNode(w http.ResponseWriter, r *http.Request) {
+	resp := new(FreezeDataNodeResp)
+	resp.RetCode = -1
+	resp.RetMsg = "fail"
+	defer WriteResp(w, &resp)
+
+	data, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("FreezeDataNode fail", zap.Error(err))
+		return
+	}
+
+	var req FreezeDataNodeReq
+	if err := json.Unmarshal(data, &req); err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("FreezeDataNode fail", zap.Error(err))
+		return
+	}
+
+	err = s.ProposeAndWait(internal.FreezeDataNode, data, nil)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error(fmt.Sprintf("FreezeDataNode fail, id=%d, freeze=%t", req.Id, req.Freeze), zap.Error(err))
+		return
+	}
+
+	resp.RetCode = 0
+	resp.RetMsg = "ok"
+	s.Logger.Info(fmt.Sprintf("FreezeDataNode ok, id=%d, freeze=%t", req.Id, req.Freeze))
+}
+
 type PingResp struct {
 	CommonResp
 	Index uint64
@@ -1430,6 +1470,7 @@ func initHttpHandler(s *MetaService) {
 
 	http.HandleFunc(DROP_RETENTION_POLICY_PATH, s.DropRetentionPolicy)
 	http.HandleFunc(DELETE_DATA_NODE_PATH, s.DeleteDataNode)
+	http.HandleFunc(FREEZE_DATA_NODE_PATH, s.FreezeDataNode)
 	http.HandleFunc(CREATE_RETENTION_POLICY_PATH, s.CreateRetentionPolicy)
 	http.HandleFunc(UPDATE_RETENTION_POLICY_PATH, s.UpdateRetentionPolicy)
 	http.HandleFunc(CREATE_USER_PATH, s.CreateUser)

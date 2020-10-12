@@ -866,6 +866,50 @@ func createShardGroup(data *Data, database, policy string, timestamp time.Time) 
 	return sgi, nil
 }
 
+// IsDataNodeFreezed returns whether the node has been freezed
+func (c *Client) IsDataNodeFreezed(id uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.cacheData.IsFreezeDataNode(id)
+}
+
+// FreezeDataNode freezes specific node for new shard's creation
+func (c *Client) FreezeDataNode(id uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	data := c.cacheData.Clone()
+
+	if err := data.FreezeDataNode(id); err != nil {
+		return err
+	}
+
+	if err := c.commit(data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// UnfreezeDataNode restores specific node for new shard's creation
+func (c *Client) UnfreezeDataNode(id uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	data := c.cacheData.Clone()
+
+	if err := data.UnfreezeDataNode(id); err != nil {
+		return err
+	}
+
+	if err := c.commit(data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // DeleteShardGroup removes a shard group from a database and retention policy by id.
 func (c *Client) DeleteShardGroup(database, policy string, id uint64) error {
 	c.mu.Lock()

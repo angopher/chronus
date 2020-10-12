@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -34,10 +35,14 @@ type Service struct {
 	MetaClient interface {
 		TruncateShardGroups(t time.Time) error
 		DeleteDataNode(id uint64) error
+		IsDataNodeFreezed(id uint64) bool
+		FreezeDataNode(id uint64) error
+		UnfreezeDataNode(id uint64) error
 		DataNodeByTCPHost(addr string) (*meta.NodeInfo, error)
 		RemoveShardOwner(shardID, nodeID uint64) error
 		DataNodes() ([]meta.NodeInfo, error)
 		RetentionPolicy(database, name string) (*meta.RetentionPolicyInfo, error)
+		Databases() []meta.DatabaseInfo
 
 		ShardOwner(shardID uint64) (database, policy string, sgi *meta.ShardGroupInfo)
 		AddShardOwner(shardID, nodeID uint64) error
@@ -154,9 +159,15 @@ func (s *Service) handleConn(conn net.Conn) error {
 	case RequestShards:
 		groupInfo, err := s.handleShards(conn)
 		s.shardsResponse(conn, groupInfo, err)
+	case RequestNodeShards:
+		shards, err := s.handleNodeShards(conn)
+		s.nodeShardsResponse(conn, shards, err)
 	case RequestShard:
 		db, rp, info, err := s.handleShard(conn)
 		s.shardResponse(conn, db, rp, info, err)
+	case RequestFreezeDataNode:
+		err = s.handleFreezeDataNode(conn)
+		s.freezeDataNodeResponse(conn, err)
 	}
 
 	return nil
@@ -369,6 +380,59 @@ func (s *Service) removeDataNodeResponse(w io.Writer, e error) {
 	s.writeResponse(w, ResponseRemoveDataNode, &resp)
 }
 
+func (s *Service) handleFreezeDataNode(conn net.Conn) error {
+	var req FreezeDataNodeRequest
+	if err := s.readRequest(conn, &req); err != nil {
+		return err
+	}
+
+	ni, err := s.MetaClient.DataNodeByTCPHost(req.DataNodeAddr)
+	if err != nil {
+		return err
+	} else if ni == nil {
+		return fmt.Errorf("not find data node by addr:%s", req.DataNodeAddr)
+	}
+
+	if req.Freeze {
+		return s.MetaClient.FreezeDataNode(ni.ID)
+	} else {
+		return s.MetaClient.UnfreezeDataNode(ni.ID)
+	}
+}
+
+func (s *Service) freezeDataNodeResponse(w io.Writer, e error) {
+	// Build response.
+	var resp FreezeDataNodeResponse
+	setError(&resp.CommonResp, e)
+	s.writeResponse(w, ResponseFreezeDataNode, &resp)
+}
+
+func (s *Service) handleNodeShards(conn net.Conn) ([]uint64, error) {
+	var req GetNodeShardsRequest
+	if err := s.readRequest(conn, &req); err != nil {
+		return nil, err
+	}
+	if req.NodeID < 1 {
+		return nil, errors.New("Node ID should not be empty")
+	}
+
+	shards := make([]uint64, 0)
+	dbs := s.MetaClient.Databases()
+	for _, db := range dbs {
+		infoList := db.ShardInfos()
+		for _, info := range infoList {
+			if info.OwnedBy(req.NodeID) {
+				shards = append(shards, info.ID)
+			}
+		}
+	}
+	sort.Slice(shards, func(i, j int) bool {
+		return shards[i] < shards[j]
+	})
+
+	return shards, nil
+}
+
 func (s *Service) handleShards(conn net.Conn) (*meta.RetentionPolicyInfo, error) {
 	var req GetShardsRequest
 	if err := s.readRequest(conn, &req); err != nil {
@@ -420,6 +484,15 @@ func (s *Service) shardsResponse(w io.Writer, rp *meta.RetentionPolicyInfo, e er
 	s.writeResponse(w, ResponseShards, &resp)
 }
 
+func (s *Service) nodeShardsResponse(w io.Writer, shards []uint64, e error) {
+	// Build response.
+	var resp NodeShardsResponse
+	setError(&resp.CommonResp, e)
+	resp.Shards = shards
+
+	s.writeResponse(w, ResponseNodeShards, &resp)
+}
+
 func (s *Service) handleShard(conn net.Conn) (string, string, *meta.ShardInfo, error) {
 	var (
 		req       GetShardRequest
@@ -469,7 +542,7 @@ func (s *Service) handleShowDataNodes() ([]DataNode, error) {
 
 	var dataNodes []DataNode
 	for _, n := range nodes {
-		dataNodes = append(dataNodes, DataNode{ID: n.ID, TcpAddr: n.TCPHost, HttpAddr: n.Host})
+		dataNodes = append(dataNodes, DataNode{ID: n.ID, TcpAddr: n.TCPHost, HttpAddr: n.Host, Freezed: s.MetaClient.IsDataNodeFreezed(n.ID)})
 	}
 	return dataNodes, nil
 }
@@ -543,6 +616,10 @@ type GetShardsRequest struct {
 	Database, RetentionPolicy string
 }
 
+type GetNodeShardsRequest struct {
+	NodeID uint64
+}
+
 type GetShardRequest struct {
 	ShardID uint64
 }
@@ -564,10 +641,19 @@ type RemoveDataNodeResponse struct {
 	CommonResp
 }
 
+type FreezeDataNodeRequest struct {
+	DataNodeAddr string `json:"data_node_addr"`
+	Freeze       bool   `json:"freeze"`
+}
+type FreezeDataNodeResponse struct {
+	CommonResp
+}
+
 type DataNode struct {
 	ID       uint64 `json:"id"`
 	TcpAddr  string `json:"tcp_addr"`
 	HttpAddr string `json:"http_addr"`
+	Freezed  bool   `json:"freezed"`
 }
 
 type ShardGroup struct {
@@ -591,6 +677,11 @@ type ShardsResponse struct {
 	Duration      int64        `json:"duration"`
 	GroupDuration int64        `json:"group_duration"`
 	Groups        []ShardGroup `json:"groups"`
+}
+
+type NodeShardsResponse struct {
+	CommonResp
+	Shards []uint64 `json:"shards"`
 }
 
 type ShardResponse struct {
@@ -621,6 +712,8 @@ const (
 	RequestShowDataNodes
 	RequestShards
 	RequestShard
+	RequestFreezeDataNode
+	RequestNodeShards
 )
 
 type ResponseType byte
@@ -636,4 +729,6 @@ const (
 	ResponseShowDataNodes
 	ResponseShards
 	ResponseShard
+	ResponseFreezeDataNode
+	ResponseNodeShards
 )

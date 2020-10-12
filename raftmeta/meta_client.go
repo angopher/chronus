@@ -1,10 +1,11 @@
 package raftmeta
 
 import (
+	"time"
+
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
-	"time"
 )
 
 type MetaClient interface {
@@ -20,6 +21,9 @@ type MetaClient interface {
 	CreateUser(name, password string, admin bool) (meta.User, error)
 	CreateDataNode(httpAddr, tcpAddr string) (*meta.NodeInfo, error)
 	DeleteDataNode(id uint64) error
+	IsDataNodeFreezed(id uint64) bool
+	FreezeDataNode(id uint64) error
+	UnfreezeDataNode(id uint64) error
 	Authenticate(username, password string) (meta.User, error)
 	PruneShardGroups() error
 	DeleteShardGroup(database, policy string, id uint64) error

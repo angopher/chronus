@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strconv"
 	"time"
 
@@ -54,6 +55,27 @@ func TruncateShards(delay string, addr string) error {
 	}
 
 	fmt.Println(resp.Msg)
+	return nil
+}
+
+func ListShardOnNode(addr string, nodeId uint64) error {
+	var req controller.GetNodeShardsRequest
+	var resp controller.NodeShardsResponse
+	respTyp := byte(controller.ResponseNodeShards)
+	reqTyp := byte(controller.RequestNodeShards)
+	req.NodeID = nodeId
+	var err error
+	if err = RequestAndWaitResp(addr, reqTyp, respTyp, req, &resp); err != nil {
+		return err
+	}
+	if resp.Code != 0 {
+		return errors.New(resp.Msg)
+	}
+
+	color.Set(color.Bold)
+	color.Green(fmt.Sprint("Shards on node ", req.NodeID, ":\n"))
+	fmt.Println(resp.Shards)
+	fmt.Println()
 	return nil
 }
 
@@ -237,6 +259,33 @@ func RemoveDataNode(addr, removed_addr string) error {
 	return nil
 }
 
+func freezeDataNode(addr, freezed_addr string, freeze bool) error {
+	req := &controller.FreezeDataNodeRequest{
+		DataNodeAddr: freezed_addr,
+		Freeze:       freeze,
+	}
+
+	var resp controller.FreezeDataNodeResponse
+	respTyp := byte(controller.ResponseFreezeDataNode)
+	reqTyp := byte(controller.RequestFreezeDataNode)
+	if err := RequestAndWaitResp(addr, reqTyp, respTyp, req, &resp); err != nil {
+		return err
+	}
+
+	color.Set(color.Bold)
+	color.Green("Result: ")
+	fmt.Println(resp.Msg)
+	return nil
+}
+
+func FreezeDataNode(addr, freezed_addr string) error {
+	return freezeDataNode(addr, freezed_addr, true)
+}
+
+func UnfreezeDataNode(addr, freezed_addr string) error {
+	return freezeDataNode(addr, freezed_addr, false)
+}
+
 func getNodes(addr string) (map[uint64]controller.DataNode, error) {
 	var resp controller.ShowDataNodesResponse
 	respTyp := byte(controller.ResponseShowDataNodes)
@@ -258,8 +307,20 @@ func ShowDataNodes(addr string) error {
 	if err != nil {
 		return err
 	}
+	ids := make([]uint64, 0, len(nodes))
 	for _, n := range nodes {
-		fmt.Print(n.ID, "\thttp://", n.HttpAddr, "\ttcp://", n.TcpAddr, "\n")
+		ids = append(ids, n.ID)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i] < ids[j]
+	})
+	for _, id := range ids {
+		n := nodes[id]
+		fmt.Print(n.ID, "\thttp://", n.HttpAddr, "\ttcp://", n.TcpAddr)
+		if n.Freezed {
+			fmt.Print("\t(freezed)")
+		}
+		fmt.Print("\n")
 	}
 	fmt.Println()
 	return nil

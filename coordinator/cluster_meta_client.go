@@ -126,6 +126,25 @@ func (me *ClusterMetaClient) DeleteDataNode(id uint64) error {
 	}
 	return me.cache.DeleteDataNode(id)
 }
+
+func (me *ClusterMetaClient) IsDataNodeFreezed(id uint64) bool {
+	return me.cache.IsDataNodeFreezed(id)
+}
+
+func (me *ClusterMetaClient) FreezeDataNode(id uint64) error {
+	if err := me.metaCli.FreezeDataNode(id); err != nil {
+		return err
+	}
+	return me.cache.FreezeDataNode(id)
+}
+
+func (me *ClusterMetaClient) UnfreezeDataNode(id uint64) error {
+	if err := me.metaCli.UnfreezeDataNode(id); err != nil {
+		return err
+	}
+	return me.cache.UnfreezeDataNode(id)
+}
+
 func (me *ClusterMetaClient) Database(name string) *meta.DatabaseInfo {
 	return me.cache.Database(name)
 }

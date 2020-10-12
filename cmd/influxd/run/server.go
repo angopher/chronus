@@ -211,7 +211,7 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 	// If we've already created a data node for our id, we're done
 	n, err := s.ClusterMetaClient.DataNode(nodeID)
 	if err != nil {
-		s.Logger.Warn("Node id from store can't be used, try to create new", zap.Error(err))
+		s.Logger.Warn(fmt.Sprintf("Node id(%d) from store can't be used, try to create new", nodeID), zap.Error(err))
 		n, err = s.ClusterMetaClient.CreateDataNode(s.httpAPIAddr, s.tcpAddr)
 		if err != nil {
 			s.Logger.Warn(fmt.Sprint("Unable to create data node. err: ", err.Error()))

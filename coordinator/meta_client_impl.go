@@ -134,6 +134,27 @@ func (me *MetaClientImpl) DeleteDataNode(id uint64) error {
 	return nil
 }
 
+func (me *MetaClientImpl) freezeDataNode(id uint64, freeze bool) error {
+	req := raftmeta.FreezeDataNodeReq{Id: id, Freeze: freeze}
+	var resp raftmeta.FreezeDataNodeResp
+	err := RequestAndParseResponse(me.Url(raftmeta.FREEZE_DATA_NODE_PATH), &req, &resp)
+	if err != nil {
+		return err
+	}
+
+	if resp.RetCode != 0 {
+		return errors.New(resp.RetMsg)
+	}
+
+	return nil
+}
+func (me *MetaClientImpl) FreezeDataNode(id uint64) error {
+	return me.freezeDataNode(id, true)
+}
+func (me *MetaClientImpl) UnfreezeDataNode(id uint64) error {
+	return me.freezeDataNode(id, false)
+}
+
 func (me *MetaClientImpl) AddShardOwner(shardID, nodeID uint64) error {
 	req := raftmeta.AddShardOwnerReq{
 		ShardID: shardID,

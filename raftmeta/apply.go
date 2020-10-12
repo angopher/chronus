@@ -363,11 +363,21 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		}
 
 		s.Logger.Info("checksum", zap.Uint64("index", req.Index), zap.String("checksum", s.lastChecksum.checksum))
-		x.AssertTruef(s.lastChecksum.checksum == req.Checksum, "verify checksum fail, %s != %s, data=%+v",
+		x.AssertTruef(s.lastChecksum.checksum == req.Checksum, "verify checksum fail, local %s != %s, data=%+v",
 			s.lastChecksum.checksum, req.Checksum,
 			s.MetaCli.Data(),
 		)
 		s.Logger.Info(fmt.Sprintf("verify checksum success. costs %s", time.Now().Sub(start)))
+	case internal.FreezeDataNode:
+		var req FreezeDataNodeReq
+		err := json.Unmarshal(proposal.Data, &req)
+		x.Check(err)
+		s.Logger.Debug(fmt.Sprintf("req %+v", req))
+		if req.Freeze {
+			return s.MetaCli.FreezeDataNode(req.Id)
+		} else {
+			return s.MetaCli.UnfreezeDataNode(req.Id)
+		}
 	default:
 		return fmt.Errorf("Unkown msg type:%d", proposal.Type)
 	}

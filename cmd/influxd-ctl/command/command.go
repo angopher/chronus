@@ -3,9 +3,9 @@ package command
 import (
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/angopher/chronus/cmd/influxd-ctl/action"
-	"github.com/fatih/color"
 	"github.com/urfave/cli/v2"
 )
 
@@ -32,13 +32,39 @@ func NodeCommand() *cli.Command {
 					return nil
 				},
 			}, {
+				Name:      "freeze",
+				ArgsUsage: "freeze <ip:port>",
+				Usage:     "freeze specified node preventing creating new shard on",
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 1 {
+						return errors.New("Please specify node addr to be freezed")
+					}
+					if err := action.FreezeDataNode(DataNodeAddress, ctx.Args().Get(0)); err != nil {
+						fmt.Println(err)
+					}
+
+					return nil
+				},
+			}, {
+				Name:      "unfreeze",
+				ArgsUsage: "unfreeze <ip:port>",
+				Usage:     "unfreeze specified node",
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 1 {
+						return errors.New("Please specify node addr to unfreeze")
+					}
+					if err := action.UnfreezeDataNode(DataNodeAddress, ctx.Args().Get(0)); err != nil {
+						fmt.Println(err)
+					}
+
+					return nil
+				},
+			}, {
 				Name:      "remove",
 				ArgsUsage: "remove <ip:port>",
 				Usage:     "remove specified node from cluster",
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 1 {
-						fmt.Println("Please specify node addr to be removed from cluster")
-						fmt.Println()
 						return errors.New("Please specify node addr to be removed from cluster")
 					}
 					if err := action.RemoveDataNode(DataNodeAddress, ctx.Args().Get(0)); err != nil {
@@ -59,7 +85,7 @@ func ShardCommand() *cli.Command {
 		Subcommands: []*cli.Command{
 			{
 				Name:      "list",
-				ArgsUsage: "copy <db> <rp>",
+				ArgsUsage: "list <db> <rp>",
 				Usage:     "show all shards of specified retention policy",
 				Description: fmt.Sprint(
 					"List all shards in specified retention policy.",
@@ -75,6 +101,27 @@ func ShardCommand() *cli.Command {
 
 				},
 			}, {
+				Name:      "node",
+				ArgsUsage: "node <node id>",
+				Usage:     "show all shards' id on specified node",
+				Description: fmt.Sprint(
+					"List all shards on node.",
+				),
+				Action: func(ctx *cli.Context) error {
+					if ctx.Args().Len() < 1 {
+						return errors.New("Please specify node id")
+					}
+					nodeId, _ := strconv.ParseUint(ctx.Args().Get(0), 10, 64)
+					if nodeId < 1 {
+						return errors.New("Please specify node id")
+					}
+					if err := action.ListShardOnNode(DataNodeAddress, nodeId); err != nil {
+						fmt.Println(err)
+					}
+					return nil
+
+				},
+			}, {
 				Name:      "info",
 				ArgsUsage: "info <shard-id>",
 				Usage:     "show information of specified shard",
@@ -83,8 +130,6 @@ func ShardCommand() *cli.Command {
 				),
 				Action: func(ctx *cli.Context) error {
 					if ctx.Args().Len() < 1 {
-						color.Red("Please specify shard id\n")
-						fmt.Println()
 						return errors.New("Please specify shard id")
 					}
 					if err := action.GetShard(DataNodeAddress, ctx.Args().Get(0)); err != nil {
