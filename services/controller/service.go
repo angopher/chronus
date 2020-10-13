@@ -163,8 +163,8 @@ func (s *Service) handleConn(conn net.Conn) error {
 		shards, err := s.handleNodeShards(conn)
 		s.nodeShardsResponse(conn, shards, err)
 	case RequestShard:
-		db, rp, info, err := s.handleShard(conn)
-		s.shardResponse(conn, db, rp, info, err)
+		db, rp, info, groupInfo, err := s.handleShard(conn)
+		s.shardResponse(conn, db, rp, info, groupInfo, err)
 	case RequestFreezeDataNode:
 		err = s.handleFreezeDataNode(conn)
 		s.freezeDataNodeResponse(conn, err)
@@ -493,7 +493,7 @@ func (s *Service) nodeShardsResponse(w io.Writer, shards []uint64, e error) {
 	s.writeResponse(w, ResponseNodeShards, &resp)
 }
 
-func (s *Service) handleShard(conn net.Conn) (string, string, *meta.ShardInfo, error) {
+func (s *Service) handleShard(conn net.Conn) (string, string, *meta.ShardInfo, *meta.ShardGroupInfo, error) {
 	var (
 		req       GetShardRequest
 		err       error
@@ -515,14 +515,14 @@ func (s *Service) handleShard(conn net.Conn) (string, string, *meta.ShardInfo, e
 	}
 	for _, shard := range groupInfo.Shards {
 		if shard.ID == req.ShardID {
-			return db, rp, &shard, nil
+			return db, rp, &shard, groupInfo, nil
 		}
 	}
 NOT_FOUND:
-	return "", "", nil, err
+	return "", "", nil, nil, err
 }
 
-func (s *Service) shardResponse(w io.Writer, db, rp string, shard *meta.ShardInfo, e error) {
+func (s *Service) shardResponse(w io.Writer, db, rp string, shard *meta.ShardInfo, groupInfo *meta.ShardGroupInfo, e error) {
 	var resp ShardResponse
 	setError(&resp.CommonResp, e)
 	if e == nil {
@@ -530,6 +530,10 @@ func (s *Service) shardResponse(w io.Writer, db, rp string, shard *meta.ShardInf
 		resp.DB = db
 		resp.Rp = rp
 		resp.Nodes = fromMetaOwners(shard.Owners)
+		resp.GroupID = groupInfo.ID
+		resp.Begin = groupInfo.StartTime.UnixNano() / MILLISECOND
+		resp.End = groupInfo.EndTime.UnixNano() / MILLISECOND
+		resp.Truncated = groupInfo.TruncatedAt.UnixNano() / MILLISECOND
 	}
 	s.writeResponse(w, ResponseShard, &resp)
 }
@@ -686,10 +690,14 @@ type NodeShardsResponse struct {
 
 type ShardResponse struct {
 	CommonResp
-	ID    uint64   `json:"id"`
-	DB    string   `json:"db"`
-	Rp    string   `json:"rp"`
-	Nodes []uint64 `json:"nodes"`
+	ID        uint64   `json:"id"`
+	DB        string   `json:"db"`
+	Rp        string   `json:"rp"`
+	Nodes     []uint64 `json:"nodes"`
+	GroupID   uint64   `json:"groupId"`
+	Begin     int64    `json:"begin"`
+	End       int64    `json:"end"`
+	Truncated int64    `json:"truncated"`
 }
 
 type ShowDataNodesResponse struct {
