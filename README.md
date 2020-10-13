@@ -53,6 +53,13 @@ You would get four binaries (metad, metad-ctl, influxd,
 influxd-ctl) if successfully. You can put them into PATH or
 package them into private repository.
 
+TIPS for proxy:
+
+```shell
+export GO111MODULE=on
+export GOPROXY=https://goproxy.io
+```
+
 ## Boot Meta Cluster
 
 ### Configuration
