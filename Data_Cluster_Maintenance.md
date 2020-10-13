@@ -88,6 +88,7 @@ as `A` and the new one as `B`.
 3. Truncate shards and wait a while to make sure no further writes on A and B
 4. Get all shards through `influxd-ctl shard node`
 5. Copy them from A to B through `influxd-ctl shard copy`
-6. Better to verify the actual data directories are copied correctly
-7. Remove A from cluster
-8. Unfreeze B to let it accept creation of new shards
+6. Progress can be checked through `influxd-ctl shard status`
+7. Better to verify the actual data directories are copied correctly
+8. Remove A from cluster
+9. Unfreeze B to let it accept creation of new shards
