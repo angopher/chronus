@@ -175,6 +175,10 @@ Pay attention to the following rules:
 - Append only.
 - Carefully set retention policies.
 
+## Maintenance
+
+Maintain meta cluster please check [Meta Cluster Maintenance](Meta_Cluster_Maintenance.md)
+
 ## License
 
 Chronus is under the MIT license. See the [LICENSE](LICENSE) file for details.
