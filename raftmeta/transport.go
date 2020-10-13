@@ -210,6 +210,10 @@ func (s *RaftNode) HandleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		resp.RetMsg = err.Error()
 		return
 	}
+	if op == "add" {
+		// trigger a new snapshot, make sure the new node is existed in snapshot sent later.
+		s.triggerSnapshot()
+	}
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
 }

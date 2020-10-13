@@ -57,15 +57,18 @@ func NewConfig() Config {
 		MyAddr:              DefaultAddr,
 		RaftId:              1,
 		Peers:               []Peer{},
-		TickTimeMs:          20,
+		TickTimeMs:          60,
 		ElectionTick:        DefaultElectionTick,
 		HeartbeatTick:       DefaultHeartbeatTick,
 		MaxSizePerMsg:       DefaultMaxSizePerMsg,
 		MaxInflightMsgs:     DefaultMaxInflightMsgs,
 		WalDir:              "./wal",
-		SnapshotIntervalSec: 60,
-		ChecksumIntervalSec: 10,
+		SnapshotIntervalSec: 300,
+		ChecksumIntervalSec: 120,
 		RetentionAutoCreate: true,
+		LogFormat:           "console",
+		LogLevel:            "info",
+		LogDir:              "./logs",
 	}
 }
 

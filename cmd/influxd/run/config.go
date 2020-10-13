@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/influxdata/influxdb/logger"
@@ -75,7 +76,10 @@ type Config struct {
 func NewConfig() *Config {
 	c := &Config{}
 	c.Meta = meta.NewConfig()
+	c.Meta.Dir = "./meta"
 	c.Data = tsdb.NewConfig()
+	c.Data.Dir = "./data"
+	c.Data.WALDir = "./wal"
 	c.Coordinator = coordinator.NewConfig()
 	c.Precreator = precreator.NewConfig()
 
@@ -85,6 +89,8 @@ func NewConfig() *Config {
 	c.Logging = logger.NewConfig()
 
 	c.HintedHandoff = hh.NewConfig()
+	c.HintedHandoff.Enabled = true
+	c.HintedHandoff.Dir = "./hh"
 	c.Controller = controller.NewConfig()
 
 	c.GraphiteInputs = []graphite.Config{graphite.NewConfig()}
@@ -93,6 +99,7 @@ func NewConfig() *Config {
 	c.UDPInputs = []udp.Config{udp.NewConfig()}
 
 	c.ContinuousQuery = continuous_querier.NewConfig()
+	c.ContinuousQuery.RunInterval = itoml.Duration(time.Minute)
 	c.Retention = retention.NewConfig()
 	c.BindAddress = DefaultBindAddress
 

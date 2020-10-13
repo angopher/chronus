@@ -20,15 +20,19 @@ func main() {
 	configFile := f.String("config", "", "Specify config file")
 	dumpFile := f.String("dump", "", "Boot and dump the snapshot to a file specified")
 	restoreFile := f.String("restore", "", "Boot and restore data from the snapshot specified")
+	showSample := f.Bool("sample", false, "Show sample configuration")
 	f.Parse(os.Args[1:])
 
 	config := raftmeta.NewConfig()
+	if *showSample {
+		toml.NewEncoder(os.Stdout).Encode(&config)
+		fmt.Println()
+		return
+	}
+
 	if *configFile != "" {
 		x.Check((&config).FromTomlFile(*configFile))
 	} else {
-		fmt.Print("Sample configuration:\n\n")
-		toml.NewEncoder(os.Stdout).Encode(&config)
-		fmt.Println()
 		f.Usage()
 		return
 	}

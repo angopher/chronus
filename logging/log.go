@@ -43,7 +43,7 @@ func newEncoder(format string) (zapcore.Encoder, error) {
 	switch format {
 	case "json":
 		return zapcore.NewJSONEncoder(config), nil
-	case "console":
+	case "console", "auto":
 		return zapcore.NewConsoleEncoder(config), nil
 	case "logfmt":
 		return zaplogfmt.NewEncoder(config), nil

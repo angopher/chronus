@@ -469,7 +469,7 @@ func (s *RaftNode) Run() {
 		case <-snapshotTicker.C:
 			if leader == s.ID {
 				go func() {
-					err := s.trigerSnapshot()
+					err := s.triggerSnapshot()
 					if err != nil {
 						s.Logger.Error("calculateSnapshot fail", zap.Error(err))
 					}
@@ -569,8 +569,8 @@ func (s *RaftNode) triggerChecksum() {
 	}
 }
 
-func (s *RaftNode) trigerSnapshot() error {
-	s.Logger.Info("trigerSnapshot")
+func (s *RaftNode) triggerSnapshot() error {
+	s.Logger.Info("triggerSnapshot")
 	var sn internal.CreateSnapshot
 	//_, err = s.Storage.LastIndex()
 	//x.Check(err)

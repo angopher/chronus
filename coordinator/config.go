@@ -71,7 +71,7 @@ func NewConfig() Config {
 		MaxSelectPointN:           DefaultMaxSelectPointN,
 		MaxSelectSeriesN:          DefaultMaxSelectSeriesN,
 		MetaServices:              []string{DefaultMetaService},
-		PingMetaServiceIntervalMs: 50,
+		PingMetaServiceIntervalMs: 250,
 	}
 }
 
