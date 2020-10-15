@@ -90,7 +90,7 @@ Then a single node meta cluster is done.
 Using:
 
 ```shell
-metad-ctl -s ip:port status
+metad-ctl status -s ip:port
 ```
 
 You can specify any **alive** address in cluster by `-s ip:port` and it's

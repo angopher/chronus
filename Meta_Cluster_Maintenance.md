@@ -3,7 +3,7 @@
 ## Get Status of Cluster
 
 ```shell
-metad-ctl -s ip:port status
+metad-ctl status -s ip:port
 ```
 
 Sample output as:
