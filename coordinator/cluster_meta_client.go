@@ -92,7 +92,7 @@ func (me *ClusterMetaClient) syncLoop() {
 				// normal
 				if printLimiter.Allow() {
 					// one log in 10 seconds
-					me.Logger.Info(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
+					me.Logger.Debug(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
 				}
 			}
 		}
