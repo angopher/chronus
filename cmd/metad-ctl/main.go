@@ -26,15 +26,7 @@ func main() {
 		cmds.AddCommand(),
 		cmds.UpdateCommand(),
 		cmds.RemoveCommand(),
-	}
-	app.Flags = []cli.Flag{
-		&cli.StringFlag{
-			Name:        "metad",
-			Aliases:     []string{"s"},
-			Required:    true,
-			Usage:       "Node address in cluster, ip:port",
-			Destination: &cmds.MetadAddress,
-		},
+		cmds.StorageCommand(),
 	}
 	app.Run(os.Args)
 }

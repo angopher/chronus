@@ -1317,8 +1317,9 @@ func (s *MetaService) DropSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 type AcquireLeaseReq struct {
-	Name   string
-	NodeId uint64
+	Name        string
+	NodeId      uint64
+	RequestTime int64 // timestamp in millis
 }
 
 type AcquireLeaseResp struct {
@@ -1346,15 +1347,27 @@ func (s *MetaService) AcquireLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// do pre-check before proposing
+	if !s.Node.ShouldTryAcquireLease(req.Name, req.NodeId) {
+		resp.RetMsg = ErrAcquiredByOther.Error()
+		return
+	}
+
+	req.RequestTime = time.Now().UnixNano() / 1e6
+	data, _ = json.Marshal(&req)
+
 	lease := &meta.Lease{}
 	err = s.ProposeAndWait(internal.AcquireLease, data, lease)
 	if err != nil {
 		resp.RetMsg = err.Error()
 		if !strings.Contains(err.Error(), "another node has the lease") {
-			s.Logger.Error("AcquireLease fail",
-				zap.String("Name", req.Name),
-				zap.Uint64("NodeId", req.NodeId),
-				zap.Error(err))
+			s.Logger.Error(
+				fmt.Sprintf(
+					"AcquireLease fail, name=%s, node=%d",
+					req.Name, req.NodeId,
+				),
+				zap.Error(err),
+			)
 		}
 		return
 	}
@@ -1364,7 +1377,8 @@ func (s *MetaService) AcquireLease(w http.ResponseWriter, r *http.Request) {
 	resp.RetMsg = "ok"
 	s.Logger.Debug("AcquireLease ok",
 		zap.String("Name", req.Name),
-		zap.Uint64("NodeId", req.NodeId))
+		zap.Uint64("NodeId", req.NodeId),
+	)
 }
 
 type DataResp struct {

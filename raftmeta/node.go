@@ -125,7 +125,7 @@ type RaftNode struct {
 
 	MetaCli MetaClient
 	//用于Continuous query
-	leases *meta.Leases
+	leases *ClusterLeases
 
 	//raft集群内部配置状态
 	RaftConfState *raftpb.ConfState
@@ -176,7 +176,8 @@ type RaftNode struct {
 	//only for test
 	ApplyCallBack func(proposal *internal.Proposal, index uint64)
 
-	Logger *zap.Logger
+	Logger        *zap.Logger
+	SugaredLogger *zap.SugaredLogger
 }
 
 func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
@@ -219,11 +220,13 @@ func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
 	//storage := raft.NewMemoryStorage()
 	storage := raftwal.Init(walStore, c.ID, 0)
 	c.Storage = storage
+	selfLogger := logger.With(zap.String("raftmeta", "RaftNode"))
 	return &RaftNode{
-		leases:        meta.NewLeases(meta.DefaultLeaseDuration),
+		leases:        NewClusterLeases(meta.DefaultLeaseDuration, selfLogger),
 		ID:            c.ID,
 		RaftConfig:    c,
-		Logger:        logger.With(zap.String("raftmeta", "RaftNode")),
+		Logger:        selfLogger,
+		SugaredLogger: selfLogger.Sugar(),
 		Config:        config,
 		RaftCtx:       rc,
 		Storage:       storage,
@@ -389,7 +392,7 @@ func (s *RaftNode) reclaimDiskSpace() {
 	for {
 		select {
 		case <-ticker.C:
-			s.walStore.RunValueLogGC(0.1)
+			s.walStore.RunValueLogGC(0.5)
 		case <-s.Done:
 			return
 		}
@@ -751,4 +754,8 @@ func (s *RaftNode) PastLife() (idx uint64, restart bool, rerr error) {
 		restart = true
 	}
 	return
+}
+
+func (s *RaftNode) ShouldTryAcquireLease(name string, nodeId uint64) bool {
+	return s.leases.ShouldTry(name, nodeId)
 }

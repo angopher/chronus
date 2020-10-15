@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 
 	"github.com/angopher/chronus/cmd/metad-ctl/util"
@@ -46,6 +45,7 @@ func StatusCommand() *cli.Command {
 		Usage:       "status of cluster",
 		Description: "Get the cluster status",
 		Action:      clusterStatus,
+		Flags:       []cli.Flag{FLAG_ADDR},
 	}
 }
 
@@ -69,6 +69,5 @@ func clusterStatus(ctx *cli.Context) (err error) {
 	return nil
 
 ERR:
-	fmt.Fprintln(os.Stderr, err.Error())
 	return err
 }

@@ -17,6 +17,7 @@ func AddCommand() *cli.Command {
 		Description: "Introdue new node to cluster should follow two phases operation:\n   1. Add node to configuration using `metad-ctl add`\n   2. Boot up new node with confugration up to date",
 		ArgsUsage:   "<new-node-id> <ip:port>",
 		Action:      clusterAdd,
+		Flags:       []cli.Flag{FLAG_ADDR},
 	}
 }
 
@@ -27,6 +28,7 @@ func UpdateCommand() *cli.Command {
 		Description: "Update address of a node which is already in cluster should follow two phases operation:\n   1. Stop the node\n    2. Update address\n    3. Boot up node with confugration up to date",
 		ArgsUsage:   "<new-node-id> <ip:port>",
 		Action:      clusterUpdate,
+		Flags:       []cli.Flag{FLAG_ADDR},
 	}
 }
 
@@ -37,6 +39,7 @@ func RemoveCommand() *cli.Command {
 		Description: "Remove specified node from config.",
 		ArgsUsage:   "<node-id>",
 		Action:      clusterRemove,
+		Flags:       []cli.Flag{FLAG_ADDR},
 	}
 }
 

@@ -4,6 +4,7 @@ require (
 	github.com/BurntSushi/toml v0.3.1
 	github.com/dgraph-io/badger/v2 v2.2007.2
 	github.com/dgraph-io/dgraph v1.2.7
+	github.com/dustin/go-humanize v1.0.0
 	github.com/fatih/color v1.9.0
 	github.com/gogo/protobuf v1.3.1
 	github.com/golang/snappy v0.0.2
@@ -14,6 +15,7 @@ require (
 	github.com/jsternberg/zap-logfmt v1.2.0
 	github.com/klauspost/compress v1.11.1 // indirect
 	github.com/klauspost/pgzip v1.2.5 // indirect
+	github.com/kr/pretty v0.2.0 // indirect
 	github.com/pkg/errors v0.9.1
 	github.com/stretchr/testify v1.6.1 // test
 	github.com/urfave/cli/v2 v2.2.0

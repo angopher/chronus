@@ -7,6 +7,17 @@ import (
 	"strings"
 
 	"github.com/angopher/chronus/raftmeta"
+	"github.com/urfave/cli/v2"
+)
+
+var (
+	FLAG_ADDR = &cli.StringFlag{
+		Name:        "metad",
+		Aliases:     []string{"s"},
+		Required:    true,
+		Usage:       "Node address in cluster, ip:port",
+		Destination: &MetadAddress,
+	}
 )
 
 func parseNodeAddr(arg string) (string, error) {
