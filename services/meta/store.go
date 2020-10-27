@@ -464,10 +464,6 @@ func (c *Client) user(name string) (meta.User, error) {
 	return nil, meta.ErrUserNotFound
 }
 
-// bcryptCost is the cost associated with generating password with bcrypt.
-// This setting is lowered during testing to improve test suite performance.
-var bcryptCost = bcrypt.DefaultCost
-
 // hashWithSalt returns a salted hash of password using salt.
 func (c *Client) hashWithSalt(salt []byte, password string) []byte {
 	hasher := sha256.New()
@@ -487,7 +483,7 @@ func (c *Client) saltedHash(password string) (salt, hash []byte, err error) {
 }
 
 // CreateUser adds a user with the given name and password and admin status.
-func (c *Client) CreateUser(name, password string, admin bool) (meta.User, error) {
+func (c *Client) CreateUser(name, hashedPassword string, admin bool) (meta.User, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -495,19 +491,14 @@ func (c *Client) CreateUser(name, password string, admin bool) (meta.User, error
 
 	// See if the user already exists.
 	if u, err := c.user(name); err != nil && u != nil {
-		if err := bcrypt.CompareHashAndPassword([]byte(u.(*meta.UserInfo).Hash), []byte(password)); err != nil || u.(*meta.UserInfo).Admin != admin {
+		info := u.(*meta.UserInfo)
+		if info.Hash != hashedPassword || info.Admin != admin {
 			return nil, meta.ErrUserExists
 		}
 		return u, nil
 	}
 
-	// Hash the password before serializing it.
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := data.CreateUser(name, string(hash), admin); err != nil {
+	if err := data.CreateUser(name, hashedPassword, admin); err != nil {
 		return nil, err
 	}
 
@@ -519,23 +510,17 @@ func (c *Client) CreateUser(name, password string, admin bool) (meta.User, error
 }
 
 // UpdateUser updates the password of an existing user.
-func (c *Client) UpdateUser(name, password string) error {
+func (c *Client) UpdateUser(name, hashedPassword string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	data := c.cacheData.Clone()
 
-	// Hash the password before serializing it.
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
+	if err := data.UpdateUser(name, hashedPassword); err != nil {
 		return err
 	}
 
-	if err := data.UpdateUser(name, string(hash)); err != nil {
-		return err
-	}
-
-	delete(c.authCache, name)
+	defer delete(c.authCache, name)
 
 	return c.commit(data)
 }
@@ -550,6 +535,8 @@ func (c *Client) DropUser(name string) error {
 	if err := data.DropUser(name); err != nil {
 		return err
 	}
+
+	defer delete(c.authCache, name)
 
 	if err := c.commit(data); err != nil {
 		return err

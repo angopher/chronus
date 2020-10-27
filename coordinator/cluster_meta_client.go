@@ -223,11 +223,9 @@ func (me *ClusterMetaClient) CreateSubscription(database, rp, name, mode string,
 	return me.cache.CreateSubscription(database, rp, name, mode, destinations)
 }
 
-func (me *ClusterMetaClient) CreateUser(name, password string, admin bool) (meta.User, error) {
-	if u, err := me.metaCli.CreateUser(name, password, admin); err != nil {
-		return u, err
-	}
-	return me.cache.CreateUser(name, password, admin)
+func (me *ClusterMetaClient) CreateUser(name, password string, admin bool) (u meta.User, err error) {
+	u, err = me.metaCli.CreateUser(name, password, admin)
+	return
 }
 
 func (me *ClusterMetaClient) Databases() []meta.DatabaseInfo {
@@ -337,7 +335,7 @@ func (me *ClusterMetaClient) UpdateUser(name, password string) error {
 	if err := me.metaCli.UpdateUser(name, password); err != nil {
 		return err
 	}
-	return me.cache.UpdateUser(name, password)
+	return nil
 }
 
 func (me *ClusterMetaClient) UserPrivilege(username, database string) (*influxql.Privilege, error) {

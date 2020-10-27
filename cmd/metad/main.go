@@ -60,7 +60,7 @@ func main() {
 	x.Check(err)
 
 	node := raftmeta.NewRaftNode(config, log)
-	node.MetaCli = metaCli
+	node.MetaStore = metaCli
 
 	// dump only
 	if *dumpFile != "" {

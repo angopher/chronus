@@ -32,7 +32,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Infof("apply create database %+v", req)
-		db, err := s.MetaCli.CreateDatabase(req.Name)
+		db, err := s.MetaStore.CreateDatabase(req.Name)
 		pctx.err = err
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(db != nil)
@@ -44,19 +44,19 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.DropDatabase(req.Name)
+		return s.MetaStore.DropDatabase(req.Name)
 	case internal.DropRetentionPolicy:
 		var req DropRetentionPolicyReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.DropRetentionPolicy(req.Database, req.Policy)
+		return s.MetaStore.DropRetentionPolicy(req.Database, req.Policy)
 	case internal.CreateShardGroup:
 		var req CreateShardGroupReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		sg, err := s.MetaCli.CreateShardGroup(req.Database, req.Policy, time.Unix(req.Timestamp, 0))
+		sg, err := s.MetaStore.CreateShardGroup(req.Database, req.Policy, time.Unix(req.Timestamp, 0))
 		if err == nil && pctx.retData != nil {
 			if sg != nil {
 				*pctx.retData.(*meta.ShardGroupInfo) = *sg
@@ -70,7 +70,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		ni, err := s.MetaCli.CreateDataNode(req.HttpAddr, req.TcpAddr)
+		ni, err := s.MetaStore.CreateDataNode(req.HttpAddr, req.TcpAddr)
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(ni != nil)
 			*pctx.retData.(*meta.NodeInfo) = *ni
@@ -81,7 +81,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.DeleteDataNode(req.Id)
+		return s.MetaStore.DeleteDataNode(req.Id)
 	case internal.CreateRetentionPolicy:
 		var req CreateRetentionPolicyReq
 		err := json.Unmarshal(proposal.Data, &req)
@@ -99,7 +99,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 			Duration:           duration,
 			ShardGroupDuration: req.Rps.ShardGroupDuration,
 		}
-		rpi, err := s.MetaCli.CreateRetentionPolicy(req.Database, &spec, req.MakeDefault)
+		rpi, err := s.MetaStore.CreateRetentionPolicy(req.Database, &spec, req.MakeDefault)
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(rpi != nil)
 			*pctx.retData.(*meta.RetentionPolicyInfo) = *rpi
@@ -133,7 +133,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 			Duration:           duration,
 			ShardGroupDuration: sduration,
 		}
-		return s.MetaCli.UpdateRetentionPolicy(req.Database, req.Name, &up, req.MakeDefault)
+		return s.MetaStore.UpdateRetentionPolicy(req.Database, req.Name, &up, req.MakeDefault)
 
 	case internal.CreateDatabaseWithRetentionPolicy:
 		var req CreateDatabaseWithRetentionPolicyReq
@@ -152,7 +152,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 			Duration:           duration,
 			ShardGroupDuration: req.Rps.ShardGroupDuration,
 		}
-		db, err := s.MetaCli.CreateDatabaseWithRetentionPolicy(req.Name, &spec)
+		db, err := s.MetaStore.CreateDatabaseWithRetentionPolicy(req.Name, &spec)
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(db != nil)
 			*pctx.retData.(*meta.DatabaseInfo) = *db
@@ -164,7 +164,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		user, err := s.MetaCli.CreateUser(req.Name, req.Password, req.Admin)
+		user, err := s.MetaStore.CreateUser(req.Name, req.Password, req.Admin)
 		if err == nil && pctx.retData != nil {
 			x.AssertTrue(user != nil)
 			*pctx.retData.(*meta.UserInfo) = *(user.(*meta.UserInfo))
@@ -176,36 +176,37 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.DropUser(req.Name)
+		return s.MetaStore.DropUser(req.Name)
 
 	case internal.UpdateUser:
 		var req UpdateUserReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.UpdateUser(req.Name, req.Password)
+		// XXX password should be hashed before to keep consistent between nodes
+		return s.MetaStore.UpdateUser(req.Name, req.Password)
 
 	case internal.SetPrivilege:
 		var req SetPrivilegeReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.SetPrivilege(req.UserName, req.Database, req.Privilege)
+		return s.MetaStore.SetPrivilege(req.UserName, req.Database, req.Privilege)
 
 	case internal.SetAdminPrivilege:
 		var req SetAdminPrivilegeReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.SetAdminPrivilege(req.UserName, req.Admin)
+		return s.MetaStore.SetAdminPrivilege(req.UserName, req.Admin)
 
 	case internal.Authenticate:
 		var req AuthenticateReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		user, err := s.MetaCli.Authenticate(req.UserName, req.Password)
-		if err == nil {
+		user, err := s.MetaStore.Authenticate(req.UserName, req.Password)
+		if err == nil && pctx != nil && pctx.retData != nil {
 			x.AssertTrue(user != nil)
 			*pctx.retData.(*meta.UserInfo) = *(user.(*meta.UserInfo))
 		}
@@ -216,73 +217,73 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("add shard owner req %+v", req)
-		return s.MetaCli.AddShardOwner(req.ShardID, req.NodeID)
+		return s.MetaStore.AddShardOwner(req.ShardID, req.NodeID)
 
 	case internal.RemoveShardOwner:
 		var req RemoveShardOwnerReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("remove shard owner req %+v", req)
-		return s.MetaCli.RemoveShardOwner(req.ShardID, req.NodeID)
+		return s.MetaStore.RemoveShardOwner(req.ShardID, req.NodeID)
 
 	case internal.DropShard:
 		var req DropShardReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.DropShard(req.Id)
+		return s.MetaStore.DropShard(req.Id)
 
 	case internal.TruncateShardGroups:
 		var req TruncateShardGroupsReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.TruncateShardGroups(req.Time)
+		return s.MetaStore.TruncateShardGroups(req.Time)
 
 	case internal.PruneShardGroups:
-		return s.MetaCli.PruneShardGroups()
+		return s.MetaStore.PruneShardGroups()
 
 	case internal.DeleteShardGroup:
 		var req DeleteShardGroupReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.DeleteShardGroup(req.Database, req.Policy, req.Id)
+		return s.MetaStore.DeleteShardGroup(req.Database, req.Policy, req.Id)
 
 	case internal.PrecreateShardGroups:
 		var req PrecreateShardGroupsReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.PrecreateShardGroups(req.From, req.To)
+		return s.MetaStore.PrecreateShardGroups(req.From, req.To)
 
 	case internal.CreateContinuousQuery:
 		var req CreateContinuousQueryReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.CreateContinuousQuery(req.Database, req.Name, req.Query)
+		return s.MetaStore.CreateContinuousQuery(req.Database, req.Name, req.Query)
 
 	case internal.DropContinuousQuery:
 		var req DropContinuousQueryReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.DropContinuousQuery(req.Database, req.Name)
+		return s.MetaStore.DropContinuousQuery(req.Database, req.Name)
 
 	case internal.CreateSubscription:
 		var req CreateSubscriptionReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaCli.CreateSubscription(req.Database, req.Rp, req.Name, req.Mode, req.Destinations)
+		return s.MetaStore.CreateSubscription(req.Database, req.Rp, req.Name, req.Mode, req.Destinations)
 
 	case internal.DropSubscription:
 		var req DropSubscriptionReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
 		s.SugaredLogger.Debug("req %+v", req)
-		return s.MetaCli.DropSubscription(req.Database, req.Rp, req.Name)
+		return s.MetaStore.DropSubscription(req.Database, req.Rp, req.Name)
 
 	case internal.AcquireLease:
 		var req AcquireLeaseReq
@@ -301,7 +302,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		return err
 
 	case internal.SnapShot:
-		md, err := s.MetaCli.MarshalBinary()
+		md, err := s.MetaStore.MarshalBinary()
 		x.Check(err)
 		var sndata internal.SnapshotData
 		sndata.Data = md
@@ -316,7 +317,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 	case internal.CreateChecksumMsg:
 		//TODO:optimize, reduce block time
 		start := time.Now()
-		mcd := s.MetaCli.Data()
+		mcd := s.MetaStore.Data()
 
 		//消除DeleteAt和TruncatedAt对checksum的影响
 		for i := range mcd.Databases {
@@ -369,7 +370,7 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		s.Logger.Info("checksum", zap.Uint64("index", req.Index), zap.String("checksum", s.lastChecksum.checksum))
 		x.AssertTruef(s.lastChecksum.checksum == req.Checksum, "verify checksum fail, local %s != %s, data=%+v",
 			s.lastChecksum.checksum, req.Checksum,
-			s.MetaCli.Data(),
+			s.MetaStore.Data(),
 		)
 		s.Logger.Info(fmt.Sprintf("verify checksum success. costs %s", time.Now().Sub(start)))
 	case internal.FreezeDataNode:
@@ -378,9 +379,9 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		x.Check(err)
 		s.SugaredLogger.Debugf("req %+v", req)
 		if req.Freeze {
-			return s.MetaCli.FreezeDataNode(req.Id)
+			return s.MetaStore.FreezeDataNode(req.Id)
 		} else {
-			return s.MetaCli.UnfreezeDataNode(req.Id)
+			return s.MetaStore.UnfreezeDataNode(req.Id)
 		}
 	default:
 		return fmt.Errorf("Unknown msg type:%d", proposal.Type)

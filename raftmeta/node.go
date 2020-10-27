@@ -123,7 +123,7 @@ type RaftNode struct {
 	ID   uint64
 	Node raft.Node
 
-	MetaCli MetaClient
+	MetaStore MetaStore
 	//用于Continuous query
 	leases *ClusterLeases
 
@@ -373,7 +373,7 @@ func (s *RaftNode) restoreFromSnapshot() bool {
 	err = metaData.UnmarshalBinary(sndata.Data)
 	x.Checkf(err, "meta data UnmarshalBinary fail")
 
-	err = s.MetaCli.ReplaceData(metaData)
+	err = s.MetaStore.ReplaceData(metaData)
 	x.Checkf(err, "meta cli ReplaceData fail")
 
 	return true

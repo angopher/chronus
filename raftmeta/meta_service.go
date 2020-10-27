@@ -16,6 +16,7 @@ import (
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type CommonResp struct {
@@ -587,6 +588,15 @@ func (s *MetaService) CreateUser(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error("CreateUser fail", zap.Error(err))
 		return
 	}
+	// regenerate data due to pre-hashed password
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("Hash user password fail", zap.Error(err))
+		return
+	}
+	req.Password = string(hash)
+	data, _ = json.Marshal(&req)
 
 	user := &meta.UserInfo{}
 	err = s.ProposeAndWait(internal.CreateUser, data, user)
@@ -594,7 +604,6 @@ func (s *MetaService) CreateUser(w http.ResponseWriter, r *http.Request) {
 		resp.RetMsg = err.Error()
 		s.Logger.Error("CreateUser fail",
 			zap.String("Name", req.Name),
-			zap.String("Password", req.Password),
 			zap.Bool("Admin", req.Admin),
 			zap.Error(err))
 		return
@@ -605,7 +614,6 @@ func (s *MetaService) CreateUser(w http.ResponseWriter, r *http.Request) {
 	resp.RetMsg = "ok"
 	s.Logger.Info("CreateUser ok",
 		zap.String("Name", req.Name),
-		zap.String("Password", req.Password),
 		zap.Bool("Admin", req.Admin))
 }
 
@@ -675,12 +683,20 @@ func (s *MetaService) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error("UpdateUser fail", zap.Error(err))
 		return
 	}
+	// regenerate data due to pre-hashed password
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("Hash user password fail", zap.Error(err))
+		return
+	}
+	req.Password = string(hash)
+	data, _ = json.Marshal(&req)
 
 	err = s.ProposeAndWait(internal.UpdateUser, data, nil)
 	if err != nil {
 		s.Logger.Error("UpdateUser fail",
 			zap.String("Name", req.Name),
-			zap.String("Password", req.Password),
 			zap.Error(err))
 		resp.RetMsg = err.Error()
 		return
@@ -689,8 +705,7 @@ func (s *MetaService) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
 	s.Logger.Info("UpdateUser ok",
-		zap.String("Name", req.Name),
-		zap.String("Password", req.Password))
+		zap.String("Name", req.Name))
 }
 
 type SetPrivilegeReq struct {
@@ -812,24 +827,18 @@ func (s *MetaService) Authenticate(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error("Authenticate fail", zap.Error(err))
 		return
 	}
-
-	user := &meta.UserInfo{}
-	err = s.ProposeAndWait(internal.Authenticate, data, user)
+	u, err := s.Node.MetaStore.Authenticate(req.UserName, req.Password)
 	if err != nil {
 		s.Logger.Error("Authenticate fail",
 			zap.String("UserName", req.UserName),
-			zap.String("Password", req.Password),
 			zap.Error(err))
 		resp.RetMsg = err.Error()
 		return
 	}
 
-	resp.UserInfo = *(user)
+	resp.UserInfo = *(u.(*meta.UserInfo))
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("Authenticate ok",
-		zap.String("UserName", req.UserName),
-		zap.String("Password", req.Password))
 }
 
 type AddShardOwnerReq struct {

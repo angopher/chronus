@@ -127,7 +127,7 @@ func newService(config raftmeta.Config, t *fakeTransport, cb func(proposal *inte
 	log := logger.New(os.Stderr)
 
 	node := raftmeta.NewRaftNode(config, log)
-	node.MetaCli = metaCli
+	node.MetaStore = metaCli
 	node.ApplyCallBack = cb
 
 	node.Transport = t
