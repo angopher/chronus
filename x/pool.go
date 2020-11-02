@@ -163,9 +163,9 @@ func (pool *boundedPool) Get() (newConn PooledConn, errOccurred error) {
 	}
 
 	// statistics
-	begin := time.Now().Nanosecond() / 1e3
+	begin := time.Now()
 	defer func() {
-		cost := uint64(time.Now().Nanosecond()/1e3 - begin)
+		cost := uint64(time.Now().Sub(begin).Microseconds())
 		if errOccurred == nil {
 			atomic.AddUint64(&pool.getSuccessCnt, 1)
 			atomic.AddUint64(&pool.getSuccessCost, cost)
