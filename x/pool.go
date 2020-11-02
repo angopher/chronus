@@ -63,8 +63,8 @@ type boundedPool struct {
 	factory Factory
 
 	// statistics
-	getSuccessCnt, getSuccessCost uint64
-	getFailureCnt, getFailureCost uint64
+	getSuccessCnt, getSuccessCost uint64 // in us
+	getFailureCnt, getFailureCost uint64 // in us
 	returnCnt, closeCnt           uint64
 }
 
@@ -163,9 +163,9 @@ func (pool *boundedPool) Get() (newConn PooledConn, errOccurred error) {
 	}
 
 	// statistics
-	begin := time.Now().Nanosecond() / 1e6
+	begin := time.Now().Nanosecond() / 1e3
 	defer func() {
-		cost := uint64(time.Now().Nanosecond()/1e6 - begin)
+		cost := uint64(time.Now().Nanosecond()/1e3 - begin)
 		if errOccurred == nil {
 			atomic.AddUint64(&pool.getSuccessCnt, 1)
 			atomic.AddUint64(&pool.getSuccessCost, cost)
@@ -301,9 +301,9 @@ func (pool *boundedPool) Statistics() PoolStatistics {
 	stat.Active = int(total) - stat.Idle
 
 	stat.GetSuccessCnt = atomic.LoadUint64(&pool.getSuccessCnt)
-	stat.GetSuccessMillis = atomic.LoadUint64(&pool.getSuccessCost)
+	stat.GetSuccessMillis = atomic.LoadUint64(&pool.getSuccessCost) / 1e3 // us to ms
 	stat.GetFailureCnt = atomic.LoadUint64(&pool.getFailureCnt)
-	stat.GetFailureMillis = atomic.LoadUint64(&pool.getFailureCost)
+	stat.GetFailureMillis = atomic.LoadUint64(&pool.getFailureCost) / 1e3 // us to ms
 	stat.ReturnCnt = atomic.LoadUint64(&pool.returnCnt)
 	stat.CloseCnt = atomic.LoadUint64(&pool.closeCnt)
 
