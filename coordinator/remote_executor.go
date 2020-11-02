@@ -31,6 +31,7 @@ type RemoteNodeExecutor interface {
 	MapType(nodeId uint64, m *influxql.Measurement, field string, shardIds []uint64) (influxql.DataType, error)
 	CreateIterator(nodeId uint64, ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.Iterator, error)
 	TaskManagerStatement(nodeId uint64, stmt influxql.Statement) (*query.Result, error)
+	Stats() []StatEntity
 }
 
 type remoteNodeExecutor struct {
@@ -41,8 +42,8 @@ type remoteNodeExecutor struct {
 	Logger             *zap.Logger
 }
 
-func (me *remoteNodeExecutor) WithLogger(log *zap.Logger) {
-	me.Logger = log.With(zap.String("service", "RemoteNodeExecutor"))
+func (executor *remoteNodeExecutor) WithLogger(log *zap.Logger) {
+	executor.Logger = log.With(zap.String("service", "RemoteNodeExecutor"))
 }
 
 func writeTestPacket(conn net.Conn) (err error) {
@@ -84,8 +85,8 @@ func getConnWithRetry(pool *ClientPool, nodeId uint64, logger *zap.Logger) (x.Po
 	return nil, err
 }
 
-func (me *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.Iterator, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.Iterator, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -123,18 +124,14 @@ func (me *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Context,
 		return nil, err
 	}
 
-	if resp.DataType == influxql.Unknown {
-		return nil, nil
-	}
-
 	stats := query.IteratorStats{SeriesN: resp.SeriesN}
 	//conn.Close will be invoked when iterator.Close
 	itr := query.NewReaderIterator(ctx, newIteratorReader(conn, resp.Termination), resp.DataType, stats)
 	return itr, nil
 }
 
-func (me *remoteNodeExecutor) MapType(nodeId uint64, m *influxql.Measurement, field string, shardIds []uint64) (influxql.DataType, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) MapType(nodeId uint64, m *influxql.Measurement, field string, shardIds []uint64) (influxql.DataType, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return influxql.Unknown, err
 	}
@@ -171,8 +168,8 @@ func (me *remoteNodeExecutor) MapType(nodeId uint64, m *influxql.Measurement, fi
 	return resp.DataType, nil
 }
 
-func (me *remoteNodeExecutor) IteratorCost(nodeId uint64, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.IteratorCost, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) IteratorCost(nodeId uint64, m *influxql.Measurement, opt query.IteratorOptions, shardIds []uint64) (query.IteratorCost, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return query.IteratorCost{}, err
 	}
@@ -204,8 +201,8 @@ func (me *remoteNodeExecutor) IteratorCost(nodeId uint64, m *influxql.Measuremen
 	return resp.Cost, nil
 }
 
-func (me *remoteNodeExecutor) FieldDimensions(nodeId uint64, m *influxql.Measurement, shardIds []uint64) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) FieldDimensions(nodeId uint64, m *influxql.Measurement, shardIds []uint64) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -236,8 +233,8 @@ func (me *remoteNodeExecutor) FieldDimensions(nodeId uint64, m *influxql.Measure
 	return resp.Fields, resp.Dimensions, nil
 }
 
-func (me *remoteNodeExecutor) TaskManagerStatement(nodeId uint64, stmt influxql.Statement) (*query.Result, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) TaskManagerStatement(nodeId uint64, stmt influxql.Statement) (*query.Result, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -270,8 +267,8 @@ func (me *remoteNodeExecutor) TaskManagerStatement(nodeId uint64, stmt influxql.
 	return result, nil
 }
 
-func (me *remoteNodeExecutor) SeriesCardinality(nodeId uint64, database string) (int64, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) SeriesCardinality(nodeId uint64, database string) (int64, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return -1, err
 	}
@@ -303,8 +300,8 @@ func (me *remoteNodeExecutor) SeriesCardinality(nodeId uint64, database string) 
 	return n, nil
 }
 
-func (me *remoteNodeExecutor) MeasurementNames(nodeId uint64, database string, cond influxql.Expr) ([][]byte, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) MeasurementNames(nodeId uint64, database string, cond influxql.Expr) ([][]byte, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -337,8 +334,8 @@ func (me *remoteNodeExecutor) MeasurementNames(nodeId uint64, database string, c
 	return names, nil
 }
 
-func (me *remoteNodeExecutor) TagValues(nodeId uint64, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagValues, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) TagValues(nodeId uint64, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagValues, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -373,8 +370,8 @@ func (me *remoteNodeExecutor) TagValues(nodeId uint64, shardIDs []uint64, cond i
 	return tagValues, nil
 }
 
-func (me *remoteNodeExecutor) TagKeys(nodeId uint64, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagKeys, error) {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) TagKeys(nodeId uint64, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagKeys, error) {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -407,8 +404,8 @@ func (me *remoteNodeExecutor) TagKeys(nodeId uint64, shardIDs []uint64, cond inf
 	return tagKeys, nil
 }
 
-func (me *remoteNodeExecutor) DeleteMeasurement(nodeId uint64, database, name string) error {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) DeleteMeasurement(nodeId uint64, database, name string) error {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return err
 	}
@@ -439,8 +436,8 @@ func (me *remoteNodeExecutor) DeleteMeasurement(nodeId uint64, database, name st
 	return nil
 }
 
-func (me *remoteNodeExecutor) DeleteDatabase(nodeId uint64, database string) error {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) DeleteDatabase(nodeId uint64, database string) error {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return err
 	}
@@ -470,8 +467,8 @@ func (me *remoteNodeExecutor) DeleteDatabase(nodeId uint64, database string) err
 	return nil
 }
 
-func (me *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string, sources []influxql.Source, cond influxql.Expr) error {
-	conn, err := getConnWithRetry(me.ClientPool, nodeId, me.Logger)
+func (executor *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string, sources []influxql.Source, cond influxql.Expr) error {
+	conn, err := getConnWithRetry(executor.ClientPool, nodeId, executor.Logger)
 	if err != nil {
 		return err
 	}
@@ -501,6 +498,10 @@ func (me *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string, sourc
 	}
 
 	return nil
+}
+
+func (executor *remoteNodeExecutor) Stats() []StatEntity {
+	return executor.ClientPool.Stat()
 }
 
 type iteratorReader struct {

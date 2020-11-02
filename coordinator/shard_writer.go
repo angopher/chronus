@@ -151,3 +151,7 @@ func (w *ShardWriter) Close() error {
 	w.pool = nil
 	return nil
 }
+
+func (w *ShardWriter) Stats() []StatEntity {
+	return w.pool.Stat()
+}

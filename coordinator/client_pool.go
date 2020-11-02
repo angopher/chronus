@@ -3,6 +3,7 @@ package coordinator
 import (
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -21,6 +22,11 @@ type ClientPool struct {
 	factory PoolFactory
 }
 
+type StatEntity struct {
+	NodeId uint64
+	Stat   x.PoolStatistics
+}
+
 type poolEntry struct {
 	pool    x.ConnPool
 	lastUse time.Time
@@ -37,33 +43,33 @@ func NewClientPool(factory PoolFactory) *ClientPool {
 	return pool
 }
 
-func (c *ClientPool) Len() int {
-	c.mu.RLock()
+func (clientPool *ClientPool) Len() int {
+	clientPool.mu.RLock()
 	var size int
-	for _, p := range c.pools {
+	for _, p := range clientPool.pools {
 		size += p.pool.Len()
 	}
-	c.mu.RUnlock()
+	clientPool.mu.RUnlock()
 	return size
 }
 
-func (c *ClientPool) Total() int {
-	c.mu.RLock()
+func (clientPool *ClientPool) Total() int {
+	clientPool.mu.RLock()
 	var size int
-	for _, p := range c.pools {
+	for _, p := range clientPool.pools {
 		size += p.pool.Total()
 	}
-	c.mu.RUnlock()
+	clientPool.mu.RUnlock()
 	return size
 }
 
-func (c *ClientPool) idleCheckOnce() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+func (clientPool *ClientPool) idleCheckOnce() {
+	clientPool.mu.Lock()
+	defer clientPool.mu.Unlock()
 
 	now := time.Now()
 	var removed []uint64
-	for nodeId, entry := range c.pools {
+	for nodeId, entry := range clientPool.pools {
 		if now.Sub(entry.lastUse) <= 600*time.Second {
 			continue
 		}
@@ -71,59 +77,78 @@ func (c *ClientPool) idleCheckOnce() {
 		removed = append(removed, nodeId)
 	}
 	for _, id := range removed {
-		if entry, ok := c.pools[id]; ok {
+		if entry, ok := clientPool.pools[id]; ok {
 			entry.pool.Close()
-			delete(c.pools, id)
+			delete(clientPool.pools, id)
 		}
 	}
 }
 
-func (c *ClientPool) idleCheckLoop() {
-	c.wg.Add(1)
-	defer c.wg.Done()
+func (clientPool *ClientPool) idleCheckLoop() {
+	clientPool.wg.Add(1)
+	defer clientPool.wg.Done()
 
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			c.idleCheckOnce()
-		case <-c.closer:
+			clientPool.idleCheckOnce()
+		case <-clientPool.closer:
 			return
 		}
 	}
 }
 
-func (c *ClientPool) GetConn(nodeID uint64) (x.PooledConn, error) {
-	c.mu.RLock()
-	if entry, ok := c.pools[nodeID]; ok {
+func (clientPool *ClientPool) GetConn(nodeID uint64) (x.PooledConn, error) {
+	clientPool.mu.RLock()
+	if entry, ok := clientPool.pools[nodeID]; ok {
 		entry.lastUse = time.Now()
-		c.mu.RUnlock()
+		clientPool.mu.RUnlock()
 		return entry.pool.Get()
 	}
-	c.mu.RUnlock()
+	clientPool.mu.RUnlock()
 	// switch to write lock
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	clientPool.mu.Lock()
+	defer clientPool.mu.Unlock()
 	// create new pool
-	pool, err := c.factory(nodeID)
+	pool, err := clientPool.factory(nodeID)
 	if err != nil {
 		return nil, err
 	}
-	c.pools[nodeID] = &poolEntry{
+	clientPool.pools[nodeID] = &poolEntry{
 		lastUse: time.Now(),
 		pool:    pool,
 	}
 	return pool.Get()
 }
 
-func (c *ClientPool) close() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, entry := range c.pools {
+// Dump statistics of connection pools in this client
+func (clientPool *ClientPool) Stat() []StatEntity {
+	clientPool.mu.RLock()
+	defer clientPool.mu.RUnlock()
+
+	stats := make([]StatEntity, 0, len(clientPool.pools))
+	for nodeId, pool := range clientPool.pools {
+		stats = append(stats, StatEntity{
+			Stat:   pool.pool.Statistics(),
+			NodeId: nodeId,
+		})
+	}
+	sort.Slice(stats, func(i, j int) bool {
+		return stats[i].NodeId < stats[j].NodeId
+	})
+
+	return stats
+}
+
+func (clientPool *ClientPool) close() {
+	clientPool.mu.Lock()
+	defer clientPool.mu.Unlock()
+	for _, entry := range clientPool.pools {
 		entry.pool.Close()
 	}
-	c.pools = nil
+	clientPool.pools = nil
 }
 
 type ClientConnFactory struct {

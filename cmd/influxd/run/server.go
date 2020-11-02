@@ -74,7 +74,8 @@ type Server struct {
 	BindAddress string
 	Listener    net.Listener
 
-	Logger *zap.Logger
+	Logger      *zap.Logger
+	SugarLogger *zap.SugaredLogger
 
 	Node              *influxdb.Node
 	ClusterMetaClient *coordinator.ClusterMetaClient
@@ -101,6 +102,8 @@ type Server struct {
 	// Profiling
 	CPUProfile string
 	MemProfile string
+
+	clusterExecutor *coordinator.ClusterExecutor
 
 	// httpAPIAddr is the host:port combination for the main HTTP API for querying and writing data
 	httpAPIAddr string
@@ -187,7 +190,8 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 
 		Node: node,
 
-		Logger: logger,
+		Logger:      logger,
+		SugarLogger: logger.Sugar(),
 
 		ClusterMetaClient: coordinator.NewMetaClient(c.Meta, c.Coordinator, nodeID),
 
@@ -288,6 +292,7 @@ func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, er
 	clusterExecutor.WithLogger(s.Logger)
 
 	// Initialize query executor.
+	s.clusterExecutor = clusterExecutor
 	s.QueryExecutor = query.NewExecutor()
 	s.QueryExecutor.StatementExecutor = &influxdb_coordinator.StatementExecutor{
 		MetaClient:  s.ClusterMetaClient,
@@ -579,6 +584,8 @@ func (s *Server) Open() error {
 		go s.startServerReporting()
 	}
 
+	go s.poolStatsLoop()
+
 	return nil
 }
 
@@ -686,6 +693,36 @@ func (s *Server) reportServer() {
 	s.Logger.Info("Sending usage statistics to usage.influxdata.com")
 
 	go cl.Save(usage)
+}
+
+func dumpPoolStats(name string, sugar *zap.SugaredLogger, stats []coordinator.StatEntity) {
+	sugar.Info("Dump statistics of ", name)
+	sugar.Info("active/idle/capacity, success/cost(ms), failure/cost(ms), return/close")
+	for _, stat := range stats {
+		sugar.Infof("Node %d: %d/%d/%d, %d/%d, %d/%d, %d/%d",
+			stat.NodeId,
+			stat.Stat.Active, stat.Stat.Idle, stat.Stat.Capacity,
+			stat.Stat.GetSuccessCnt, stat.Stat.GetSuccessMillis,
+			stat.Stat.GetFailureCnt, stat.Stat.GetFailureMillis,
+			stat.Stat.ReturnCnt, stat.Stat.CloseCnt,
+		)
+	}
+}
+
+func (s *Server) poolStatsLoop() {
+	ticker := time.NewTicker(120 * time.Second)
+
+LOOP:
+	for {
+		select {
+		case <-ticker.C:
+			dumpPoolStats("remote executors", s.SugarLogger, s.clusterExecutor.RemoteNodeExecutor.Stats())
+			dumpPoolStats("shard writers", s.SugarLogger, s.ShardWriter.Stats())
+		case <-s.closing:
+			//shutdown
+			break LOOP
+		}
+	}
 }
 
 // Service represents a service attached to the server.
