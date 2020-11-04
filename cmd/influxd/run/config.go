@@ -77,12 +77,15 @@ func NewConfig() *Config {
 	c.Data = tsdb.NewConfig()
 	c.Data.Dir = "./data"
 	c.Data.WALDir = "./wal"
+	c.Data.QueryLogEnabled = false
 	c.Coordinator = coordinator.NewConfig()
+	c.Coordinator.LogQueriesAfter = itoml.Duration(500 * time.Millisecond)
 	c.Precreator = precreator.NewConfig()
 
 	c.Monitor = monitor.NewConfig()
 	c.Subscriber = subscriber.NewConfig()
 	c.HTTPD = httpd.NewConfig()
+	c.HTTPD.AccessLogPath = "./logs/access.log"
 	c.Logging = logger.NewConfig()
 
 	c.HintedHandoff = hh.NewConfig()
