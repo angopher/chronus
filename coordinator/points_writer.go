@@ -405,8 +405,11 @@ func (w *PointsWriter) writeToShard(shard *meta.ShardInfo, database, retentionPo
 
 			atomic.AddInt64(&w.stats.PointWriteReqRemote, int64(len(points)))
 			err := w.ShardWriter.WriteShard(shardID, owner.NodeID, points)
-			if err != nil && IsRetryable(err) {
-				w.Logger.Warn(fmt.Sprint("ShardWriter.WriteShard fail to ", owner.NodeID), zap.Error(err))
+			if err != nil && canRetry(err) {
+				w.Logger.Warn(fmt.Sprintf(
+					"ShardWriter.WriteShard fail to %d and enqueue to hh",
+					owner.NodeID,
+				), zap.Error(err))
 				// The remote write failed so queue it via hinted handoff
 				atomic.AddInt64(&w.stats.WritePointReqHH, int64(len(points)))
 				hherr := w.HintedHandoff.WriteShard(shardID, owner.NodeID, points)
@@ -476,7 +479,7 @@ func (w *PointsWriter) writeToShard(shard *meta.ShardInfo, database, retentionPo
 	return ErrWriteFailed
 }
 
-func IsRetryable(err error) bool {
+func canRetry(err error) bool {
 	if err == nil {
 		return true
 	}
