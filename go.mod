@@ -6,6 +6,7 @@ require (
 	github.com/dgraph-io/dgraph v1.2.7
 	github.com/dustin/go-humanize v1.0.0
 	github.com/fatih/color v1.9.0
+	github.com/go-errors/errors v1.1.1
 	github.com/gogo/protobuf v1.3.1
 	github.com/golang/snappy v0.0.2
 	github.com/google/go-cmp v0.5.2

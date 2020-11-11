@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/angopher/chronus/x"
+	errs "github.com/go-errors/errors"
 	"github.com/influxdata/influxdb"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/pkg/tracing"
@@ -219,8 +219,7 @@ func (s *Service) serve() {
 			defer func() {
 				s.wg.Done()
 				if err := recover(); err != nil {
-					buf := debug.Stack()
-					s.Logger.Error("recover from panic", zap.String("stack", string(buf)))
+					s.Logger.Error("recover from panic", zap.String("stack", errs.Wrap(err, 2).ErrorStack()))
 				}
 			}()
 
@@ -253,8 +252,6 @@ func (s *Service) handle(conn net.Conn, typ byte, data []byte) (respType byte, r
 		err = s.processExecuteStatementRequest(data)
 		respType = writeShardResponseMessage
 		resp = &WriteShardResponse{}
-	case createIteratorRequestMessage:
-		s.processCreateIteratorRequest(conn, data)
 	case fieldDimensionsRequestMessage:
 		respType = fieldDimensionsResponseMessage
 		resp, err = s.processFieldDimensionsRequest(data)
@@ -342,17 +339,25 @@ func (s *Service) handleConn(conn net.Conn) {
 		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 		typ, data, err := ReadTLV(conn)
 		conn.SetDeadline(time.Time{})
-		if err == io.EOF {
-			return
-		}
-		if err, ok := err.(net.Error); ok && err.Timeout() {
-			continue
-		}
 		if err != nil {
+			if err == io.EOF || err.Error() == "use of closed network connection" {
+				break
+			}
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				continue
+			}
 			s.Logger.Error("read error", zap.Error(err))
 			break
 		}
 		if typ == 0 {
+			continue
+		}
+		if typ == createIteratorRequestMessage {
+			// iterator is different from other requests
+			ioError := s.processCreateIteratorRequest(conn, data)
+			if ioError {
+				break
+			}
 			continue
 		}
 		respType, resp, err := s.handle(conn, typ, data)
@@ -706,16 +711,10 @@ func (s *Service) processWriteShardRequest(buf []byte) error {
 	return nil
 }
 
-func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) {
+func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) (ioError bool) {
 	var itr query.Iterator
 	var trace *tracing.Trace
 	var span *tracing.Span
-	ioError := false
-	defer func() {
-		if ioError {
-			conn.Close()
-		}
-	}()
 	respType := createIteratorResponseMessage
 	if err := func() error {
 		// Parse request.
@@ -839,6 +838,7 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) {
 	if _, err := conn.Write(itrTerminator); err != nil {
 		ioError = true
 	}
+	return
 }
 
 func (s *Service) processFieldDimensionsRequest(buf []byte) (*FieldDimensionsResponse, error) {
