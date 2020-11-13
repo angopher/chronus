@@ -115,7 +115,7 @@ func (executor *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Co
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != nil {
-			return err
+			return resp.Err
 		}
 
 		return nil
@@ -544,16 +544,17 @@ func (r *iteratorReader) Read(p []byte) (n int, err error) {
 	bytes := r.bytes
 	r.bytes += n
 	if n == 0 {
-		return n, err
+		return 0, err
 	}
 	dumped := r.judger.Dump(r.buf)
 	r.judger.Write(p[:n])
-	if r.bytes <= len(r.terminator) {
+	if r.bytes < len(r.terminator) {
 		return 0, nil
 	}
 	shiftBuffer(p, r.buf[:x.Min(dumped, n)])
 	if r.judger.Compare(r.terminator) {
 		r.terminated = true
+		err = io.EOF
 	}
 	if bytes < len(r.buf) {
 		return n - (len(r.buf) - bytes), err
@@ -561,6 +562,22 @@ func (r *iteratorReader) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
+func (r *iteratorReader) consumeRest() (discarded int) {
+	if r.terminated {
+		return
+	}
+	buf := make([]byte, 32)
+	for {
+		n, err := r.Read(buf)
+		discarded += n
+		if err == io.EOF {
+			break
+		}
+	}
+	return
+}
+
 func (r *iteratorReader) Close() error {
+	r.consumeRest()
 	return r.reader.Close()
 }

@@ -797,6 +797,7 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) (ioErr
 
 	seriesN := 0
 	if itr != nil {
+		defer itr.Close()
 		seriesN = itr.Stats().SeriesN
 	}
 	// Encode success response.
@@ -807,6 +808,12 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) (ioErr
 		ioError = true
 		return
 	}
+	defer func() {
+		// Write termination of iterator
+		if _, err := conn.Write(itrTerminator); err != nil {
+			ioError = true
+		}
+	}()
 
 	// Exit if no iterator was produced.
 	if itr == nil {
@@ -822,8 +829,6 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) (ioErr
 		return
 	}
 
-	itr.Close()
-
 	if trace != nil {
 		span.Finish()
 		if err := encoder.EncodeTrace(trace); err != nil {
@@ -832,11 +837,6 @@ func (s *Service) processCreateIteratorRequest(conn net.Conn, buf []byte) (ioErr
 			ioError = true
 			return
 		}
-	}
-
-	// Write termination of iterator
-	if _, err := conn.Write(itrTerminator); err != nil {
-		ioError = true
 	}
 	return
 }

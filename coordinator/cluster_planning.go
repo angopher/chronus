@@ -176,7 +176,7 @@ func executePlanSingle(nodeId uint64, shards []meta.ShardInfo, fn QueryFn) (inte
 	defer func() {
 		r := recover()
 		if r != nil {
-			fmt.Fprintln(os.Stderr, "panic recover:", r)
+			fmt.Fprintln(os.Stderr, "panic recover on node", nodeId, ":", r)
 		}
 	}()
 	return fn(nodeId, shards)
