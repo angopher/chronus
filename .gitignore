@@ -3,3 +3,4 @@
 cmd/influxd-ctl/influxd-ctl
 cmd/influxd/influxd
 cmd/metad/metad
+sync_simulation
