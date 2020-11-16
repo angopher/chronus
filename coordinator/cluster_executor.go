@@ -406,6 +406,7 @@ func (me *ClusterExecutor) CreateIterator(ctx context.Context, m *influxql.Measu
 	result, _ := n2s.ExecuteWithRetry(fn)
 
 	seriesN := 0
+	var errOccur error
 	inputs := make([]query.Iterator, 0, len(result))
 	for _, t := range result {
 		r, ok := t.(*Result)
@@ -413,13 +414,27 @@ func (me *ClusterExecutor) CreateIterator(ctx context.Context, m *influxql.Measu
 			continue
 		}
 		if r.err != nil {
-			return nil, r.err
+			errOccur = r.err
+			break
 		}
 		if r.iter != nil {
 			stats := r.iter.Stats()
 			seriesN += stats.SeriesN
 			inputs = append(inputs, r.iter)
 		}
+	}
+	if errOccur != nil {
+		// close all iterators
+		for _, t := range result {
+			r, ok := t.(*Result)
+			if !ok {
+				continue
+			}
+			if r.iter != nil {
+				r.iter.Close()
+			}
+		}
+		return nil, errOccur
 	}
 
 	if opt.MaxSeriesN > 0 && seriesN > opt.MaxSeriesN {

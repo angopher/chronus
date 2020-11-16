@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"sort"
 	"strconv"
@@ -347,8 +346,8 @@ func RequestAndWaitResp(addr string, reqTyp, respTyp byte, req interface{}, resp
 	return DecodeTLV(conn, respTyp, resp)
 }
 
-func DecodeTLV(r io.Reader, expTyp byte, v interface{}) error {
-	typ, err := coordinator.ReadType(r)
+func DecodeTLV(conn net.Conn, expTyp byte, v interface{}) error {
+	typ, err := coordinator.ReadType(conn)
 	if err != nil {
 		return err
 	}
@@ -356,7 +355,7 @@ func DecodeTLV(r io.Reader, expTyp byte, v interface{}) error {
 		return fmt.Errorf("invalid type, exp: %d, got: %d", expTyp, typ)
 	}
 
-	buf, err := coordinator.ReadLV(r)
+	buf, err := coordinator.ReadLV(conn, 4*time.Second)
 	if err != nil {
 		return err
 	}

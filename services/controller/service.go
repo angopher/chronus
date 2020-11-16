@@ -268,7 +268,7 @@ func (s *Service) writeResponse(w io.Writer, t ResponseType, obj interface{}) {
 }
 
 func (s *Service) readRequest(conn net.Conn, obj interface{}) error {
-	buf, err := coordinator.ReadLV(conn)
+	buf, err := coordinator.ReadLV(conn, 10*time.Second)
 	if err != nil {
 		s.Logger.Error("unable to read length-value", zap.Error(err))
 		return err

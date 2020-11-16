@@ -2,7 +2,7 @@ package coordinator
 
 import (
 	"context"
-	"encoding/binary"
+	"encoding"
 	"errors"
 	"io"
 	"net"
@@ -49,12 +49,7 @@ func (executor *remoteNodeExecutor) WithLogger(log *zap.Logger) {
 func writeTestPacket(conn net.Conn) (err error) {
 	conn.SetDeadline(time.Now().Add(500 * time.Millisecond))
 	defer conn.SetDeadline(time.Time{})
-	typ := testRequestMessage
-	size := uint64(0)
-	if err = binary.Write(conn, binary.BigEndian, &typ); err != nil {
-		return
-	}
-	if err = binary.Write(conn, binary.BigEndian, &size); err != nil {
+	if _, err = conn.Write([]byte{testRequestMessage, 0, 0, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
 	return
@@ -111,7 +106,7 @@ func (executor *remoteNodeExecutor) CreateIterator(nodeId uint64, ctx context.Co
 		}
 
 		// Read the response.
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != nil {
@@ -153,7 +148,7 @@ func (executor *remoteNodeExecutor) MapType(nodeId uint64, m *influxql.Measureme
 			return err
 		}
 
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -186,7 +181,7 @@ func (executor *remoteNodeExecutor) IteratorCost(nodeId uint64, m *influxql.Meas
 			return err
 		}
 
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -218,7 +213,7 @@ func (executor *remoteNodeExecutor) FieldDimensions(nodeId uint64, m *influxql.M
 			return err
 		}
 
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != nil {
@@ -250,7 +245,7 @@ func (executor *remoteNodeExecutor) TaskManagerStatement(nodeId uint64, stmt inf
 			return err
 		}
 
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -284,7 +279,7 @@ func (executor *remoteNodeExecutor) SeriesCardinality(nodeId uint64, database st
 		}
 
 		var resp SeriesCardinalityResponse
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -318,7 +313,7 @@ func (executor *remoteNodeExecutor) MeasurementNames(nodeId uint64, database str
 		}
 
 		var resp MeasurementNamesResponse
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -354,7 +349,7 @@ func (executor *remoteNodeExecutor) TagValues(nodeId uint64, shardIDs []uint64, 
 		}
 
 		var resp TagValuesResponse
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -388,7 +383,7 @@ func (executor *remoteNodeExecutor) TagKeys(nodeId uint64, shardIDs []uint64, co
 		}
 
 		var resp TagKeysResponse
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -421,7 +416,7 @@ func (executor *remoteNodeExecutor) DeleteMeasurement(nodeId uint64, database, n
 		}
 
 		var resp DeleteMeasurementResponse
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -452,7 +447,7 @@ func (executor *remoteNodeExecutor) DeleteDatabase(nodeId uint64, database strin
 		}
 
 		var resp DeleteDatabaseResponse
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -485,7 +480,7 @@ func (executor *remoteNodeExecutor) DeleteSeries(nodeId uint64, database string,
 		}
 
 		var resp DeleteSeriesResponse
-		if _, err := DecodeTLV(conn, &resp); err != nil {
+		if _, err := decodeTLV(conn, &resp); err != nil {
 			conn.MarkUnusable()
 			return err
 		} else if resp.Err != "" {
@@ -580,4 +575,29 @@ func (r *iteratorReader) consumeRest() (discarded int) {
 func (r *iteratorReader) Close() error {
 	r.consumeRest()
 	return r.reader.Close()
+}
+
+// decodeTLV reads the type-length-value record from r and unmarshal it into v.
+func decodeTLV(conn net.Conn, v encoding.BinaryUnmarshaler) (typ byte, err error) {
+	typ, err = ReadType(conn)
+	if err != nil {
+		return 0, err
+	}
+	if err := decodeLV(conn, v); err != nil {
+		return 0, err
+	}
+	return typ, nil
+}
+
+// decodeLV reads the length-value record from r and unmarshal it into v.
+func decodeLV(conn net.Conn, v encoding.BinaryUnmarshaler) error {
+	buf, err := ReadLV(conn, 3*time.Second)
+	if err != nil {
+		return err
+	}
+
+	if err := v.UnmarshalBinary(buf); err != nil {
+		return err
+	}
+	return nil
 }

@@ -30,6 +30,14 @@ func (c *CyclicBuffer) write(data []byte, offset int) {
 	}
 }
 
+func (c *CyclicBuffer) Cap() int {
+	return len(c.buf)
+}
+
+func (c *CyclicBuffer) Len() int {
+	return c.cnt
+}
+
 // Dump dumps internal data into given slice and returns write byte count
 //	ATTENTION: the given buffer should not smaller than buffer capacity
 func (c *CyclicBuffer) Dump(data []byte) int {

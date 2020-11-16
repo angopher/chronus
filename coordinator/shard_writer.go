@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/angopher/chronus/coordinator/request"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/services/meta"
 	"go.uber.org/zap"
@@ -100,15 +101,15 @@ func (w *ShardWriter) WriteShard(shardID, ownerID uint64, points []models.Point)
 		return nil
 	}
 
-	// Build write request.
-	var request WriteShardRequest
-	request.SetShardID(shardID)
-	request.SetDatabase(db)
-	request.SetRetentionPolicy(rp)
-	request.AddPoints(points)
+	// Build write writeReq.
+	var writeReq WriteShardRequest
+	writeReq.SetShardID(shardID)
+	writeReq.SetDatabase(db)
+	writeReq.SetRetentionPolicy(rp)
+	writeReq.AddPoints(points)
 
 	// Marshal into protocol buffers.
-	buf, err := request.MarshalBinary()
+	buf, err := writeReq.MarshalBinary()
 	if err != nil {
 		return err
 	}
@@ -121,8 +122,9 @@ func (w *ShardWriter) WriteShard(shardID, ownerID uint64, points []models.Point)
 	}
 
 	// Read the response.
+	requestReader := &request.ClusterMessageReader{}
 	conn.SetReadDeadline(time.Now().Add(w.timeout))
-	_, buf, err = ReadTLV(conn)
+	resp, err := requestReader.Read(conn)
 	if err != nil {
 		conn.MarkUnusable()
 		return err
@@ -131,7 +133,7 @@ func (w *ShardWriter) WriteShard(shardID, ownerID uint64, points []models.Point)
 
 	// Unmarshal response.
 	var response WriteShardResponse
-	if err := response.UnmarshalBinary(buf); err != nil {
+	if err := response.UnmarshalBinary(resp.Data); err != nil {
 		return err
 	}
 
