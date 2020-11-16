@@ -350,6 +350,44 @@ func (me *ClusterExecutor) TagValues(auth query.Authorizer, ids []uint64, cond i
 	return tagValues, nil
 }
 
+func (me *ClusterExecutor) createLocalIteratorfunc(
+	localCtx context.Context,
+	m *influxql.Measurement,
+	shardIDs []uint64,
+	opt query.IteratorOptions,
+) (itr query.Iterator, err error) {
+	span := tracing.SpanFromContext(localCtx)
+	if span != nil {
+		span = span.StartSpan(fmt.Sprintf("local_node_id: %d", me.Node.ID))
+		defer span.Finish()
+
+		localCtx = tracing.NewContextWithSpan(localCtx, span)
+	}
+	sg := me.TSDBStore.ShardGroup(shardIDs)
+	if m.Regex != nil {
+		measurements := sg.MeasurementsByRegex(m.Regex.Val)
+		inputs := make([]query.Iterator, 0, len(measurements))
+		if err := func() error {
+			for _, measurement := range measurements {
+				mm := m.Clone()
+				mm.Name = measurement
+				input, err := sg.CreateIterator(localCtx, mm, opt)
+				if err != nil {
+					return err
+				}
+				inputs = append(inputs, input)
+			}
+			return nil
+		}(); err != nil {
+			query.Iterators(inputs).Close()
+			return nil, err
+		}
+
+		return query.Iterators(inputs).Merge(opt)
+	}
+	return sg.CreateIterator(localCtx, m, opt)
+}
+
 func (me *ClusterExecutor) CreateIterator(ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions, shards []meta.ShardInfo) (query.Iterator, error) {
 	type Result struct {
 		iter query.Iterator
@@ -363,39 +401,7 @@ func (me *ClusterExecutor) CreateIterator(ctx context.Context, m *influxql.Measu
 		shardIDs := toShardIDs(shards)
 		if nodeId == me.Node.ID {
 			//localCtx only use for local node
-			localCtx := ctx
-			iter, err = func() (query.Iterator, error) {
-				span := tracing.SpanFromContext(localCtx)
-				if span != nil {
-					span = span.StartSpan(fmt.Sprintf("local_node_id: %d", me.Node.ID))
-					defer span.Finish()
-
-					localCtx = tracing.NewContextWithSpan(localCtx, span)
-				}
-				sg := me.TSDBStore.ShardGroup(shardIDs)
-				if m.Regex != nil {
-					measurements := sg.MeasurementsByRegex(m.Regex.Val)
-					inputs := make([]query.Iterator, 0, len(measurements))
-					if err := func() error {
-						for _, measurement := range measurements {
-							mm := m.Clone()
-							mm.Name = measurement
-							input, err := sg.CreateIterator(localCtx, mm, opt)
-							if err != nil {
-								return err
-							}
-							inputs = append(inputs, input)
-						}
-						return nil
-					}(); err != nil {
-						query.Iterators(inputs).Close()
-						return nil, err
-					}
-
-					return query.Iterators(inputs).Merge(opt)
-				}
-				return sg.CreateIterator(localCtx, m, opt)
-			}()
+			iter, err = me.createLocalIteratorfunc(ctx, m, shardIDs, opt)
 		} else {
 			iter, err = me.RemoteNodeExecutor.CreateIterator(nodeId, ctx, m, opt, shardIDs)
 		}
