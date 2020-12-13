@@ -1009,6 +1009,10 @@ func (s *MetaService) TruncateShardGroups(w http.ResponseWriter, r *http.Request
 	s.Logger.Info("TruncateShardGroups ok", zap.Time("Time", req.Time))
 }
 
+type PruneShardGroupsReq struct {
+	Expiration time.Time
+}
+
 type PruneShardGroupsResp struct {
 	CommonResp
 }
@@ -1019,7 +1023,11 @@ func (s *MetaService) PruneShardGroups(w http.ResponseWriter, r *http.Request) {
 	resp.RetMsg = "fail"
 	defer WriteResp(w, &resp)
 
-	err := s.ProposeAndWait(internal.PruneShardGroups, []byte{}, nil)
+	req := &PruneShardGroupsReq{
+		Expiration: time.Now().Add(imeta.SHARDGROUP_INFO_EVICTION),
+	}
+	data, _ := json.Marshal(req)
+	err := s.ProposeAndWait(internal.PruneShardGroups, data, nil)
 	if err != nil {
 		resp.RetMsg = err.Error()
 		s.Logger.Error("PruneShardGroups fail", zap.Error(err))
@@ -1036,6 +1044,7 @@ type DeleteShardGroupReq struct {
 	Database string
 	Policy   string
 	Id       uint64
+	Now      time.Time
 }
 type DeleteShardGroupResp struct {
 	CommonResp
@@ -1050,21 +1059,22 @@ func (s *MetaService) DeleteShardGroup(w http.ResponseWriter, r *http.Request) {
 	data, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("TruncateShardGroups fail", zap.Error(err))
+		s.Logger.Error("DeleteShardGroup fail", zap.Error(err))
 		return
 	}
 
 	var req DeleteShardGroupReq
 	if err := json.Unmarshal(data, &req); err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("TruncateShardGroups fail", zap.Error(err))
+		s.Logger.Error("DeleteShardGroup fail", zap.Error(err))
 		return
 	}
+	req.Now = time.Now()
 
 	err = s.ProposeAndWait(internal.DeleteShardGroup, data, nil)
 	if err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("TruncateShardGroups fail",
+		s.Logger.Error("DeleteShardGroup fail",
 			zap.String("Database", req.Database),
 			zap.String("Policy", req.Policy),
 			zap.Uint64("Id", req.Id),
@@ -1074,7 +1084,7 @@ func (s *MetaService) DeleteShardGroup(w http.ResponseWriter, r *http.Request) {
 
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("TruncateShardGroups ok",
+	s.Logger.Info("DeleteShardGroup ok",
 		zap.String("Database", req.Database),
 		zap.String("Policy", req.Policy),
 		zap.Uint64("Id", req.Id))

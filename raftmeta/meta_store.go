@@ -25,8 +25,8 @@ type MetaStore interface {
 	FreezeDataNode(id uint64) error
 	UnfreezeDataNode(id uint64) error
 	Authenticate(username, password string) (meta.User, error)
-	PruneShardGroups() error
-	DeleteShardGroup(database, policy string, id uint64) error
+	PruneShardGroups(expiration time.Time) error
+	DeleteShardGroup(database, policy string, id uint64, t time.Time) error
 	PrecreateShardGroups(from, to time.Time) error
 
 	AddShardOwner(shardID, nodeID uint64) error

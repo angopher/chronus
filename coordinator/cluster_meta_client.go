@@ -307,14 +307,15 @@ func (me *ClusterMetaClient) DeleteShardGroup(database, policy string, id uint64
 	if err := me.metaCli.DeleteShardGroup(database, policy, id); err != nil {
 		return err
 	}
-	return me.cache.DeleteShardGroup(database, policy, id)
+	// To cache data DeletedAt is not important
+	return me.cache.DeleteShardGroup(database, policy, id, time.Now())
 }
 
 func (me *ClusterMetaClient) PruneShardGroups() error {
 	if err := me.metaCli.PruneShardGroups(); err != nil {
 		return err
 	}
-	return me.cache.PruneShardGroups()
+	return nil
 }
 
 func (me *ClusterMetaClient) PrecreateShardGroups(from, to time.Time) error {

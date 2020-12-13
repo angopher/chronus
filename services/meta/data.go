@@ -536,3 +536,24 @@ func (data *Data) RemoveShardOwner(id, nodeID uint64) {
 		}
 	}
 }
+
+// DeleteShardGroup removes a shard group from a database and retention policy by id.
+func (data *Data) DeleteShardGroup(database, policy string, id uint64, t time.Time) error {
+	// Find retention policy.
+	rpi, err := data.RetentionPolicy(database, policy)
+	if err != nil {
+		return err
+	} else if rpi == nil {
+		return influxdb.ErrRetentionPolicyNotFound(policy)
+	}
+
+	// Find shard group by ID and set its deletion timestamp.
+	for i := range rpi.ShardGroups {
+		if rpi.ShardGroups[i].ID == id {
+			rpi.ShardGroups[i].DeletedAt = t.UTC()
+			return nil
+		}
+	}
+
+	return meta.ErrShardGroupNotFound
+}

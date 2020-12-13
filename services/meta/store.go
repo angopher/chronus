@@ -766,9 +766,8 @@ func (c *Client) TruncateShardGroups(t time.Time) error {
 }
 
 // PruneShardGroups remove deleted shard groups from the data store.
-func (c *Client) PruneShardGroups() error {
+func (c *Client) PruneShardGroups(expiration time.Time) error {
 	var changed bool
-	expiration := time.Now().Add(SHARDGROUP_INFO_EVICTION)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	data := c.cacheData.Clone()
@@ -898,13 +897,13 @@ func (c *Client) UnfreezeDataNode(id uint64) error {
 }
 
 // DeleteShardGroup removes a shard group from a database and retention policy by id.
-func (c *Client) DeleteShardGroup(database, policy string, id uint64) error {
+func (c *Client) DeleteShardGroup(database, policy string, id uint64, t time.Time) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	data := c.cacheData.Clone()
 
-	if err := data.DeleteShardGroup(database, policy, id); err != nil {
+	if err := data.DeleteShardGroup(database, policy, id, t); err != nil {
 		return err
 	}
 

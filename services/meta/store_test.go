@@ -1089,7 +1089,7 @@ func TestMetaClient_PruneShardGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.PruneShardGroups(); err != nil {
+	if err := c.PruneShardGroups(time.Now().Add(imeta.SHARDGROUP_INFO_EVICTION)); err != nil {
 		t.Fatal(err)
 	}
 

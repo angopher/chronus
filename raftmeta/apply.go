@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/angopher/chronus/raftmeta/internal"
+	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
 	"github.com/influxdata/influxdb/services/meta"
 	"go.uber.org/zap"
@@ -241,14 +242,27 @@ func (s *RaftNode) applyCommitted(proposal *internal.Proposal, index uint64) err
 		return s.MetaStore.TruncateShardGroups(req.Time)
 
 	case internal.PruneShardGroups:
-		return s.MetaStore.PruneShardGroups()
+		var req PruneShardGroupsReq
+		if len(proposal.Data) > 1 {
+			err := json.Unmarshal(proposal.Data, &req)
+			x.Check(err)
+			s.SugaredLogger.Debugf("req %+v", req)
+		}
+		if req.Expiration.IsZero() {
+			// fallback
+			req.Expiration = time.Now().Add(imeta.SHARDGROUP_INFO_EVICTION)
+		}
+		return s.MetaStore.PruneShardGroups(req.Expiration)
 
 	case internal.DeleteShardGroup:
 		var req DeleteShardGroupReq
 		err := json.Unmarshal(proposal.Data, &req)
 		x.Check(err)
+		if req.Now.IsZero() {
+			req.Now = time.Now()
+		}
 		s.SugaredLogger.Debugf("req %+v", req)
-		return s.MetaStore.DeleteShardGroup(req.Database, req.Policy, req.Id)
+		return s.MetaStore.DeleteShardGroup(req.Database, req.Policy, req.Id, req.Now)
 
 	case internal.PrecreateShardGroups:
 		var req PrecreateShardGroupsReq
