@@ -24,15 +24,18 @@ func NewMetaClient(mc *meta.Config, cc Config, nodeID uint64) *ClusterMetaClient
 	return &ClusterMetaClient{
 		NodeID: nodeID,
 		metaCli: &MetaClientImpl{
-			Addrs: cc.MetaServices,
+			Addrs:  cc.MetaServices,
+			Logger: zap.NewNop(),
 		},
 		pingIntervalMs: cc.PingMetaServiceIntervalMs,
 		cache:          imeta.NewClient(mc),
+		Logger:         zap.NewNop(),
 	}
 }
 
 func (me *ClusterMetaClient) WithLogger(log *zap.Logger) {
 	me.Logger = log.With(zap.String("coordinator", "ClusterMetaClient"))
+	me.metaCli.Logger = log.With(zap.String("coordinator", "MetaClientImpl"))
 }
 
 func (me *ClusterMetaClient) Open() error {
@@ -60,39 +63,59 @@ func (me *ClusterMetaClient) syncData() error {
 	me.Logger.Info("start sync data")
 	data, err := me.metaCli.Data()
 	if err != nil {
-		fmt.Println("start sync fail ", err)
+		me.Logger.Error(fmt.Sprintf("start sync fail: %v", err))
 		return err
 	}
 
 	me.Logger.Info("start sync done")
+	if len(data.MetaNodes) > 0 {
+		addrs := make([]string, len(data.MetaNodes))
+		for i, metaNode := range data.MetaNodes {
+			addrs[i] = metaNode.Host
+		}
+		me.metaCli.UpdateAddrs(addrs)
+	}
 	return me.cache.ReplaceData(data)
 }
 
 func (me *ClusterMetaClient) syncLoop() {
 	ticker := time.NewTicker(time.Duration(me.pingIntervalMs) * time.Millisecond)
 	printLimiter := rate.NewLimiter(0.1, 1)
+	pingFailed := 0
 	for {
 		select {
 		case <-ticker.C:
+			needSync := false
 			index, err := me.metaCli.Ping()
 			if err != nil {
 				me.Logger.Warn("Ping fail", zap.Error(err))
-				continue
+				pingFailed++
+				if pingFailed > 30 {
+					needSync = true
+					pingFailed = 0
+				} else {
+					continue
+				}
+			} else {
+				switch {
+				case index > me.cache.DataIndex():
+					needSync = true
+				case index < me.cache.DataIndex():
+					me.Logger.Warn(fmt.Sprintf("index:%d < local index:%d", index, me.cache.DataIndex()))
+				default:
+					// normal
+					if printLimiter.Allow() {
+						// one log in 10 seconds
+						me.Logger.Debug(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
+					}
+				}
 			}
 
-			if index > me.cache.DataIndex() {
+			if needSync {
 				if err := me.syncData(); err != nil {
 					me.Logger.Warn("syncData fail", zap.Error(err))
 				} else {
 					me.Logger.Info("syncData success")
-				}
-			} else if index < me.cache.DataIndex() {
-				me.Logger.Warn(fmt.Sprintf("index:%d < local index:%d", index, me.cache.DataIndex()))
-			} else {
-				// normal
-				if printLimiter.Allow() {
-					// one log in 10 seconds
-					me.Logger.Debug(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
 				}
 			}
 		}
@@ -101,14 +124,30 @@ func (me *ClusterMetaClient) syncLoop() {
 
 func (me *ClusterMetaClient) Start() {
 	// sync first synchronously
-	wait := me.WaitForDataChanged()
-	go me.syncData()
-	//wait sync meta data from meta server
-	select {
-	case <-time.After(5 * time.Second):
-		//TODO:
-		panic("sync meta data failed")
-	case <-wait:
+	retryTimes := 0
+LOOP:
+	for {
+		retryTimes++
+		errC := make(chan error, 1)
+		go func(c chan error) {
+			c <- me.syncData()
+			close(c)
+		}(errC)
+
+		//wait sync meta data from meta server
+		err := <-errC
+		if err != nil {
+			// retry
+			if retryTimes < 10 {
+				me.Logger.Warn("Load data on startup failed, retry")
+				continue LOOP
+			} else {
+				panic("sync meta data failed")
+			}
+		}
+
+		break LOOP
+
 	}
 	go me.syncLoop()
 }

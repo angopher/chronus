@@ -10,10 +10,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
+	"go.uber.org/zap"
 
 	"github.com/angopher/chronus/raftmeta"
 	imeta "github.com/angopher/chronus/services/meta"
@@ -38,12 +40,24 @@ var (
 )
 
 type MetaClientImpl struct {
-	Addrs []string
+	Addrs  []string
+	Logger *zap.Logger
+
+	mu sync.Mutex
 }
 
 //	return &MetaClientImpl{MetaServiceHost: "127.0.0.1:1234"}
 
+func (me *MetaClientImpl) UpdateAddrs(addrs []string) {
+	me.mu.Lock()
+	defer me.mu.Unlock()
+	me.Addrs = addrs
+	me.Logger.Warn(fmt.Sprintf("The addresses of the meta servers have been updated: %v", addrs))
+}
+
 func (me *MetaClientImpl) Url(path string) string {
+	me.mu.Lock()
+	defer me.mu.Unlock()
 	return fmt.Sprintf("http://%s%s", me.Addrs[rand.Intn(len(me.Addrs))], path)
 }
 

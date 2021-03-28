@@ -1420,6 +1420,15 @@ func (s *MetaService) Data(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := s.cli.Data()
+	// set metad peers
+	peers := s.Node.Transport.ClonePeers()
+	data.MetaNodes = nil
+	for id, addr := range peers {
+		data.MetaNodes = append(data.MetaNodes, meta.NodeInfo{
+			ID:   id,
+			Host: addr,
+		})
+	}
 	resp.Data, err = data.MarshalBinary()
 	if err != nil {
 		resp.RetMsg = err.Error()
