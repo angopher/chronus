@@ -2,10 +2,12 @@ package coordinator
 
 import (
 	"fmt"
+	"time"
+
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
-	"time"
+	"golang.org/x/time/rate"
 
 	imeta "github.com/angopher/chronus/services/meta"
 )
@@ -22,15 +24,18 @@ func NewMetaClient(mc *meta.Config, cc Config, nodeID uint64) *ClusterMetaClient
 	return &ClusterMetaClient{
 		NodeID: nodeID,
 		metaCli: &MetaClientImpl{
-			Addrs: cc.MetaServices,
+			Addrs:  cc.MetaServices,
+			Logger: zap.NewNop(),
 		},
 		pingIntervalMs: cc.PingMetaServiceIntervalMs,
 		cache:          imeta.NewClient(mc),
+		Logger:         zap.NewNop(),
 	}
 }
 
 func (me *ClusterMetaClient) WithLogger(log *zap.Logger) {
 	me.Logger = log.With(zap.String("coordinator", "ClusterMetaClient"))
+	me.metaCli.Logger = log.With(zap.String("coordinator", "MetaClientImpl"))
 }
 
 func (me *ClusterMetaClient) Open() error {
@@ -55,58 +60,96 @@ func (me *ClusterMetaClient) ClusterID() uint64 {
 }
 
 func (me *ClusterMetaClient) syncData() error {
-	fmt.Println("start sync data")
+	me.Logger.Info("start sync data")
 	data, err := me.metaCli.Data()
 	if err != nil {
-		fmt.Println("start sync fail ", err)
+		me.Logger.Error(fmt.Sprintf("start sync fail: %v", err))
 		return err
 	}
 
-	fmt.Println("start sync done")
+	me.Logger.Info("start sync done")
+	if len(data.MetaNodes) > 0 {
+		addrs := make([]string, len(data.MetaNodes))
+		for i, metaNode := range data.MetaNodes {
+			addrs[i] = metaNode.Host
+		}
+		me.metaCli.UpdateAddrs(addrs)
+	}
 	return me.cache.ReplaceData(data)
 }
 
-func (me *ClusterMetaClient) RunSyncLoop() {
-	//sync data first and will signal changes
-	me.syncData()
-	go func() {
-		printTicker := time.NewTicker(10 * time.Second)
-		for {
-			//for print sync status
-			select {
-			case <-printTicker.C:
-				index, err := me.metaCli.Ping()
-				if err != nil {
-					me.Logger.Warn("Ping fail", zap.Error(err))
-					continue
-				}
-				me.Logger.Info(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
-			}
-		}
-	}()
-
+func (me *ClusterMetaClient) syncLoop() {
 	ticker := time.NewTicker(time.Duration(me.pingIntervalMs) * time.Millisecond)
+	printLimiter := rate.NewLimiter(0.1, 1)
+	pingFailed := 0
 	for {
 		select {
 		case <-ticker.C:
+			needSync := false
 			index, err := me.metaCli.Ping()
 			if err != nil {
 				me.Logger.Warn("Ping fail", zap.Error(err))
-				continue
+				pingFailed++
+				if pingFailed > 30 {
+					needSync = true
+					pingFailed = 0
+				} else {
+					continue
+				}
+			} else {
+				switch {
+				case index > me.cache.DataIndex():
+					needSync = true
+				case index < me.cache.DataIndex():
+					me.Logger.Warn(fmt.Sprintf("index:%d < local index:%d", index, me.cache.DataIndex()))
+				default:
+					// normal
+					if printLimiter.Allow() {
+						// one log in 10 seconds
+						me.Logger.Debug(fmt.Sprintf("index=%d local_index=%d", index, me.cache.Data().Index))
+					}
+				}
 			}
 
-			if index > me.cache.DataIndex() {
+			if needSync {
 				if err := me.syncData(); err != nil {
 					me.Logger.Warn("syncData fail", zap.Error(err))
 				} else {
 					me.Logger.Info("syncData success")
 				}
-			} else if index < me.cache.DataIndex() {
-				me.Logger.Warn(fmt.Sprintf("index:%d < local index:%d", index, me.cache.DataIndex()))
 			}
 		}
 	}
-	return
+}
+
+func (me *ClusterMetaClient) Start() {
+	// sync first synchronously
+	retryTimes := 0
+LOOP:
+	for {
+		retryTimes++
+		errC := make(chan error, 1)
+		go func(c chan error) {
+			c <- me.syncData()
+			close(c)
+		}(errC)
+
+		//wait sync meta data from meta server
+		err := <-errC
+		if err != nil {
+			// retry
+			if retryTimes < 10 {
+				me.Logger.Warn("Load data on startup failed, retry")
+				continue LOOP
+			} else {
+				panic("sync meta data failed")
+			}
+		}
+
+		break LOOP
+
+	}
+	go me.syncLoop()
 }
 
 func (me *ClusterMetaClient) CreateDatabase(name string) (*meta.DatabaseInfo, error) {
@@ -122,6 +165,25 @@ func (me *ClusterMetaClient) DeleteDataNode(id uint64) error {
 	}
 	return me.cache.DeleteDataNode(id)
 }
+
+func (me *ClusterMetaClient) IsDataNodeFreezed(id uint64) bool {
+	return me.cache.IsDataNodeFreezed(id)
+}
+
+func (me *ClusterMetaClient) FreezeDataNode(id uint64) error {
+	if err := me.metaCli.FreezeDataNode(id); err != nil {
+		return err
+	}
+	return me.cache.FreezeDataNode(id)
+}
+
+func (me *ClusterMetaClient) UnfreezeDataNode(id uint64) error {
+	if err := me.metaCli.UnfreezeDataNode(id); err != nil {
+		return err
+	}
+	return me.cache.UnfreezeDataNode(id)
+}
+
 func (me *ClusterMetaClient) Database(name string) *meta.DatabaseInfo {
 	return me.cache.Database(name)
 }
@@ -159,12 +221,13 @@ func (me *ClusterMetaClient) CreateDataNode(httpAddr, tcpAddr string) (*meta.Nod
 	return me.cache.CreateDataNode(httpAddr, tcpAddr)
 }
 
+// DataNode returns the node information according to the id, if it's not existed a meta.ErrNodeNotFound is returned.
 func (me *ClusterMetaClient) DataNode(id uint64) (*meta.NodeInfo, error) {
 	return me.cache.DataNode(id)
 }
 
 func (me *ClusterMetaClient) DataNodes() ([]meta.NodeInfo, error) {
-	return me.cache.DataNodes()
+	return me.cache.DataNodes(), nil
 }
 
 func (me *ClusterMetaClient) ShardOwner(id uint64) (string, string, *meta.ShardGroupInfo) {
@@ -199,11 +262,9 @@ func (me *ClusterMetaClient) CreateSubscription(database, rp, name, mode string,
 	return me.cache.CreateSubscription(database, rp, name, mode, destinations)
 }
 
-func (me *ClusterMetaClient) CreateUser(name, password string, admin bool) (meta.User, error) {
-	if u, err := me.metaCli.CreateUser(name, password, admin); err != nil {
-		return u, err
-	}
-	return me.cache.CreateUser(name, password, admin)
+func (me *ClusterMetaClient) CreateUser(name, password string, admin bool) (u meta.User, err error) {
+	u, err = me.metaCli.CreateUser(name, password, admin)
+	return
 }
 
 func (me *ClusterMetaClient) Databases() []meta.DatabaseInfo {
@@ -285,14 +346,15 @@ func (me *ClusterMetaClient) DeleteShardGroup(database, policy string, id uint64
 	if err := me.metaCli.DeleteShardGroup(database, policy, id); err != nil {
 		return err
 	}
-	return me.cache.DeleteShardGroup(database, policy, id)
+	// To cache data DeletedAt is not important
+	return me.cache.DeleteShardGroup(database, policy, id, time.Now())
 }
 
 func (me *ClusterMetaClient) PruneShardGroups() error {
 	if err := me.metaCli.PruneShardGroups(); err != nil {
 		return err
 	}
-	return me.cache.PruneShardGroups()
+	return nil
 }
 
 func (me *ClusterMetaClient) PrecreateShardGroups(from, to time.Time) error {
@@ -313,7 +375,7 @@ func (me *ClusterMetaClient) UpdateUser(name, password string) error {
 	if err := me.metaCli.UpdateUser(name, password); err != nil {
 		return err
 	}
-	return me.cache.UpdateUser(name, password)
+	return nil
 }
 
 func (me *ClusterMetaClient) UserPrivilege(username, database string) (*influxql.Privilege, error) {

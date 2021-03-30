@@ -9,22 +9,55 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
+	"go.uber.org/zap"
 
 	"github.com/angopher/chronus/raftmeta"
 	imeta "github.com/angopher/chronus/services/meta"
 )
 
+var (
+	client = http.Client{
+		Transport: &http.Transport{
+			Dial: func(netw, addr string) (net.Conn, error) {
+				c, err := net.DialTimeout(netw, addr, time.Second)
+				if err != nil {
+					return nil, err
+				}
+				return c, nil
+			},
+			MaxConnsPerHost:     500,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
+)
+
 type MetaClientImpl struct {
-	Addrs []string
+	Addrs  []string
+	Logger *zap.Logger
+
+	mu sync.Mutex
 }
 
 //	return &MetaClientImpl{MetaServiceHost: "127.0.0.1:1234"}
 
+func (me *MetaClientImpl) UpdateAddrs(addrs []string) {
+	me.mu.Lock()
+	defer me.mu.Unlock()
+	me.Addrs = addrs
+	me.Logger.Warn(fmt.Sprintf("The addresses of the meta servers have been updated: %v", addrs))
+}
+
 func (me *MetaClientImpl) Url(path string) string {
+	me.mu.Lock()
+	defer me.mu.Unlock()
 	return fmt.Sprintf("http://%s%s", me.Addrs[rand.Intn(len(me.Addrs))], path)
 }
 
@@ -113,6 +146,27 @@ func (me *MetaClientImpl) DeleteDataNode(id uint64) error {
 	}
 
 	return nil
+}
+
+func (me *MetaClientImpl) freezeDataNode(id uint64, freeze bool) error {
+	req := raftmeta.FreezeDataNodeReq{Id: id, Freeze: freeze}
+	var resp raftmeta.FreezeDataNodeResp
+	err := RequestAndParseResponse(me.Url(raftmeta.FREEZE_DATA_NODE_PATH), &req, &resp)
+	if err != nil {
+		return err
+	}
+
+	if resp.RetCode != 0 {
+		return errors.New(resp.RetMsg)
+	}
+
+	return nil
+}
+func (me *MetaClientImpl) FreezeDataNode(id uint64) error {
+	return me.freezeDataNode(id, true)
+}
+func (me *MetaClientImpl) UnfreezeDataNode(id uint64) error {
+	return me.freezeDataNode(id, false)
 }
 
 func (me *MetaClientImpl) AddShardOwner(shardID, nodeID uint64) error {
@@ -579,21 +633,6 @@ func RequestAndParseResponse(url string, data interface{}, resp interface{}) err
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Connection", "close")
-
-	client := http.Client{
-		Transport: &http.Transport{
-			Dial: func(netw, addr string) (net.Conn, error) {
-				deadline := time.Now().Add(10 * time.Second) //TODO: timeout from config
-				c, err := net.DialTimeout(netw, addr, time.Second)
-				if err != nil {
-					return nil, err
-				}
-				c.SetDeadline(deadline)
-				return c, nil
-			},
-		},
-	}
 
 	res, err := client.Do(req)
 	if err != nil {
@@ -606,5 +645,9 @@ func RequestAndParseResponse(url string, data interface{}, resp interface{}) err
 		return err
 	}
 
-	return json.Unmarshal(resBody, resp)
+	err = json.Unmarshal(resBody, resp)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error response(unmarshal failed):", string(resBody))
+	}
+	return err
 }

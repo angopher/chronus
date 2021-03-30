@@ -14,6 +14,7 @@ import (
 	"github.com/influxdata/influxdb"
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestMetaClient_CreateDatabaseOnly(t *testing.T) {
@@ -575,6 +576,11 @@ func TestMetaClient_DropRetentionPolicy(t *testing.T) {
 	}
 }
 
+func hashPassword(password string) string {
+	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(hash)
+}
+
 func TestMetaClient_CreateUser(t *testing.T) {
 	t.Parallel()
 
@@ -583,12 +589,12 @@ func TestMetaClient_CreateUser(t *testing.T) {
 	defer c.Close()
 
 	// Create an admin user
-	if _, err := c.CreateUser("fred", "supersecure", true); err != nil {
+	if _, err := c.CreateUser("fred", hashPassword("supersecure"), true); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create a non-admin user
-	if _, err := c.CreateUser("wilma", "password", false); err != nil {
+	if _, err := c.CreateUser("wilma", hashPassword("password"), false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -621,7 +627,7 @@ func TestMetaClient_CreateUser(t *testing.T) {
 	}
 
 	// Change password should succeed.
-	if err := c.UpdateUser("fred", "moresupersecure"); err != nil {
+	if err := c.UpdateUser("fred", hashPassword("moresupersecure")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1083,7 +1089,7 @@ func TestMetaClient_PruneShardGroups(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.PruneShardGroups(); err != nil {
+	if err := c.PruneShardGroups(time.Now().Add(imeta.SHARDGROUP_INFO_EVICTION)); err != nil {
 		t.Fatal(err)
 	}
 

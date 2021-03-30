@@ -7,19 +7,14 @@ import (
 	crand "crypto/rand"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
 
 	"github.com/influxdata/influxdb"
 	"github.com/influxdata/influxdb/logger"
-	"github.com/influxdata/influxdb/pkg/file"
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
@@ -27,14 +22,14 @@ import (
 )
 
 const (
-	// SaltBytes is the number of bytes used for salts.
-	SaltBytes = 32
+	// SALT_LENGTH is the number of bytes used for salts.
+	SALT_LENGTH = 32
 
-	metaFile = "meta.db"
+	META_FILE = "meta.db"
 
-	// ShardGroupDeletedExpiration is the amount of time before a shard group info will be removed from cached
+	// SHARDGROUP_INFO_EVICTION is the amount of time before a shard group info will be removed from cached
 	// data after it has been marked deleted (2 weeks).
-	ShardGroupDeletedExpiration = -2 * 7 * 24 * time.Hour
+	SHARDGROUP_INFO_EVICTION = -2 * 7 * 24 * time.Hour
 )
 
 // Client is used to execute commands on and read data from
@@ -77,10 +72,6 @@ func NewClient(config *meta.Config) *Client {
 		path:                config.Dir,
 		retentionAutoCreate: config.RetentionAutoCreate,
 	}
-}
-
-func (c *Client) Print() {
-	fmt.Printf("%+v\n", c.cacheData)
 }
 
 // Open a connection to a meta service cluster.
@@ -134,28 +125,30 @@ func (c *Client) data() *Data {
 	return c.cacheData
 }
 
-// Node returns a node by id.
+// DataNode returns a node by id.
+//	If specified node doesn't exist a meta.ErrNodeNotFound error will be returned.
 func (c *Client) DataNode(id uint64) (*meta.NodeInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, n := range c.data().DataNodes {
-		if n.ID == id {
-			return &n, nil
-		}
+	n := c.data().DataNode(id)
+	if n == nil {
+		return nil, ErrNodeNotFound
 	}
-	return nil, ErrNodeNotFound
+	return n, nil
 }
 
-// DataNodes returns the data nodes' info.
-func (c *Client) DataNodes() ([]meta.NodeInfo, error) {
-	return c.data().DataNodes, nil
+// DataNodes returns all nodes
+func (c *Client) DataNodes() []meta.NodeInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.data().DataNodes
 }
 
 // CreateDataNode will create a new data node in the metastore
 func (c *Client) CreateDataNode(httpAddr, tcpAddr string) (*meta.NodeInfo, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	err := c.data().CreateDataNode(httpAddr, tcpAddr)
+	_, err := c.data().CreateDataNode(httpAddr, tcpAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -172,10 +165,11 @@ func (c *Client) CreateDataNode(httpAddr, tcpAddr string) (*meta.NodeInfo, error
 
 // DataNodeByHTTPHost returns the data node with the give http bind address
 func (c *Client) DataNodeByHTTPHost(httpAddr string) (*meta.NodeInfo, error) {
-	nodes, _ := c.DataNodes()
+	nodes := c.data().DataNodes
 	for _, n := range nodes {
 		if n.Host == httpAddr {
-			return &n, nil
+			newN := n
+			return &newN, nil
 		}
 	}
 
@@ -184,10 +178,11 @@ func (c *Client) DataNodeByHTTPHost(httpAddr string) (*meta.NodeInfo, error) {
 
 // DataNodeByTCPHost returns the data node with the give http bind address
 func (c *Client) DataNodeByTCPHost(tcpAddr string) (*meta.NodeInfo, error) {
-	nodes, _ := c.DataNodes()
+	nodes := c.data().DataNodes
 	for _, n := range nodes {
 		if n.TCPHost == tcpAddr {
-			return &n, nil
+			newN := n
+			return &newN, nil
 		}
 	}
 
@@ -198,11 +193,12 @@ func (c *Client) DataNodeByTCPHost(tcpAddr string) (*meta.NodeInfo, error) {
 func (c *Client) DeleteDataNode(id uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	err := c.cacheData.DeleteDataNode(id)
+	data := c.cacheData.Clone()
+	err := data.DeleteDataNode(id)
 	if err != nil {
 		return err
 	}
-	if err := c.commit(c.cacheData); err != nil {
+	if err := c.commit(data); err != nil {
 		return err
 	}
 	return nil
@@ -468,10 +464,6 @@ func (c *Client) user(name string) (meta.User, error) {
 	return nil, meta.ErrUserNotFound
 }
 
-// bcryptCost is the cost associated with generating password with bcrypt.
-// This setting is lowered during testing to improve test suite performance.
-var bcryptCost = bcrypt.DefaultCost
-
 // hashWithSalt returns a salted hash of password using salt.
 func (c *Client) hashWithSalt(salt []byte, password string) []byte {
 	hasher := sha256.New()
@@ -482,7 +474,7 @@ func (c *Client) hashWithSalt(salt []byte, password string) []byte {
 
 // saltedHash returns a salt and salted hash of password.
 func (c *Client) saltedHash(password string) (salt, hash []byte, err error) {
-	salt = make([]byte, SaltBytes)
+	salt = make([]byte, SALT_LENGTH)
 	if _, err := io.ReadFull(crand.Reader, salt); err != nil {
 		return nil, nil, err
 	}
@@ -491,7 +483,7 @@ func (c *Client) saltedHash(password string) (salt, hash []byte, err error) {
 }
 
 // CreateUser adds a user with the given name and password and admin status.
-func (c *Client) CreateUser(name, password string, admin bool) (meta.User, error) {
+func (c *Client) CreateUser(name, hashedPassword string, admin bool) (meta.User, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -499,19 +491,14 @@ func (c *Client) CreateUser(name, password string, admin bool) (meta.User, error
 
 	// See if the user already exists.
 	if u, err := c.user(name); err != nil && u != nil {
-		if err := bcrypt.CompareHashAndPassword([]byte(u.(*meta.UserInfo).Hash), []byte(password)); err != nil || u.(*meta.UserInfo).Admin != admin {
+		info := u.(*meta.UserInfo)
+		if info.Hash != hashedPassword || info.Admin != admin {
 			return nil, meta.ErrUserExists
 		}
 		return u, nil
 	}
 
-	// Hash the password before serializing it.
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := data.CreateUser(name, string(hash), admin); err != nil {
+	if err := data.CreateUser(name, hashedPassword, admin); err != nil {
 		return nil, err
 	}
 
@@ -523,23 +510,17 @@ func (c *Client) CreateUser(name, password string, admin bool) (meta.User, error
 }
 
 // UpdateUser updates the password of an existing user.
-func (c *Client) UpdateUser(name, password string) error {
+func (c *Client) UpdateUser(name, hashedPassword string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	data := c.cacheData.Clone()
 
-	// Hash the password before serializing it.
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
-	if err != nil {
+	if err := data.UpdateUser(name, hashedPassword); err != nil {
 		return err
 	}
 
-	if err := data.UpdateUser(name, string(hash)); err != nil {
-		return err
-	}
-
-	delete(c.authCache, name)
+	defer delete(c.authCache, name)
 
 	return c.commit(data)
 }
@@ -554,6 +535,8 @@ func (c *Client) DropUser(name string) error {
 	if err := data.DropUser(name); err != nil {
 		return err
 	}
+
+	defer delete(c.authCache, name)
 
 	if err := c.commit(data); err != nil {
 		return err
@@ -783,9 +766,8 @@ func (c *Client) TruncateShardGroups(t time.Time) error {
 }
 
 // PruneShardGroups remove deleted shard groups from the data store.
-func (c *Client) PruneShardGroups() error {
+func (c *Client) PruneShardGroups(expiration time.Time) error {
 	var changed bool
-	expiration := time.Now().Add(ShardGroupDeletedExpiration)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	data := c.cacheData.Clone()
@@ -870,14 +852,58 @@ func createShardGroup(data *Data, database, policy string, timestamp time.Time) 
 	return sgi, nil
 }
 
-// DeleteShardGroup removes a shard group from a database and retention policy by id.
-func (c *Client) DeleteShardGroup(database, policy string, id uint64) error {
+// IsDataNodeFreezed returns whether the node has been freezed
+func (c *Client) IsDataNodeFreezed(id uint64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.cacheData.IsFreezeDataNode(id)
+}
+
+// FreezeDataNode freezes specific node for new shard's creation
+func (c *Client) FreezeDataNode(id uint64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	data := c.cacheData.Clone()
 
-	if err := data.DeleteShardGroup(database, policy, id); err != nil {
+	if err := data.FreezeDataNode(id); err != nil {
+		return err
+	}
+
+	if err := c.commit(data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// UnfreezeDataNode restores specific node for new shard's creation
+func (c *Client) UnfreezeDataNode(id uint64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	data := c.cacheData.Clone()
+
+	if err := data.UnfreezeDataNode(id); err != nil {
+		return err
+	}
+
+	if err := c.commit(data); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// DeleteShardGroup removes a shard group from a database and retention policy by id.
+func (c *Client) DeleteShardGroup(database, policy string, id uint64, t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	data := c.cacheData.Clone()
+
+	if err := data.DeleteShardGroup(database, policy, id, t); err != nil {
 		return err
 	}
 
@@ -1045,19 +1071,14 @@ func (c *Client) DropSubscription(database, rp, name string) error {
 // SetData overwrites the underlying data in the meta store.
 func (c *Client) SetData(data *Data) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	// reset the index so the commit will fire a change event
 	c.cacheData.Index = 0
 
-	// increment the index to force the changed channel to fire
-	d := data.Clone()
-	d.Index++
-
-	if err := c.commit(d); err != nil {
+	if err := c.commit(data.Clone()); err != nil {
 		return err
 	}
-
-	c.mu.Unlock()
 
 	return nil
 }
@@ -1137,63 +1158,13 @@ func (c *Client) WithLogger(log *zap.Logger) {
 
 // snapshot saves the current meta data to disk.
 func snapshot(path string, data *Data) error {
-	//TODO: no need write snapshot to disk
+	// no need write snapshot to disk
 	return nil
-	filename := filepath.Join(path, metaFile)
-	tmpFile := filename + "tmp"
-
-	f, err := os.Create(tmpFile)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	var d []byte
-	if b, err := data.MarshalBinary(); err != nil {
-		return err
-	} else {
-		d = b
-	}
-
-	if _, err := f.Write(d); err != nil {
-		return err
-	}
-
-	if err = f.Sync(); err != nil {
-		return err
-	}
-
-	//close file handle before renaming to support Windows
-	if err = f.Close(); err != nil {
-		return err
-	}
-
-	return file.RenameFile(tmpFile, filename)
 }
 
 // Load loads the current meta data from disk.
 func (c *Client) Load() error {
-	//TODO:no need load
-	return nil
-	file := filepath.Join(c.path, metaFile)
-
-	f, err := os.Open(file)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	defer f.Close()
-
-	data, err := ioutil.ReadAll(f)
-	if err != nil {
-		return err
-	}
-
-	if err := c.cacheData.UnmarshalBinary(data); err != nil {
-		return err
-	}
+	// no need load
 	return nil
 }
 

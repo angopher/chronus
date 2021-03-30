@@ -41,7 +41,7 @@ type Config struct {
 	Dir              string        `toml:"dir"`
 	MaxSize          int64         `toml:"max-size"`
 	MaxAge           toml.Duration `toml:"max-age"`
-	RetryConcurrency int64         `toml:"retry-concurrency"`
+	RetryConcurrency int32         `toml:"retry-concurrency"`
 	RetryRateLimit   int64         `toml:"retry-rate-limit"`
 	RetryInterval    toml.Duration `toml:"retry-interval"`
 	RetryMaxInterval toml.Duration `toml:"retry-max-interval"`

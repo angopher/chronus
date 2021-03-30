@@ -7,10 +7,10 @@ import (
 	"os"
 	"testing"
 
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
 	"github.com/influxdata/influxdb/logger"
 	"github.com/influxdata/influxdb/services/meta"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
 
 	"github.com/angopher/chronus/raftmeta"
 	"github.com/angopher/chronus/raftmeta/internal"
@@ -126,10 +126,9 @@ func newService(config raftmeta.Config, t *fakeTransport, cb func(proposal *inte
 	x.Check(err)
 	log := logger.New(os.Stderr)
 
-	node := raftmeta.NewRaftNode(config)
-	node.MetaCli = metaCli
+	node := raftmeta.NewRaftNode(config, log)
+	node.MetaStore = metaCli
 	node.ApplyCallBack = cb
-	node.WithLogger(log)
 
 	node.Transport = t
 	node.InitAndStartNode()

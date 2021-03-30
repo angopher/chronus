@@ -5,23 +5,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/angopher/chronus/raftmeta/internal"
-	imeta "github.com/angopher/chronus/services/meta"
-	"github.com/angopher/chronus/x"
-	"github.com/coreos/etcd/pkg/wait"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
-	"github.com/dgraph-io/badger"
-	"github.com/dgraph-io/badger/options"
-	"github.com/dgraph-io/dgraph/raftwal"
-	"github.com/influxdata/influxdb/services/meta"
-	"go.uber.org/zap"
-	"golang.org/x/net/trace"
+	"io"
 	"math/rand"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/angopher/chronus/raftmeta/internal"
+	imeta "github.com/angopher/chronus/services/meta"
+	"github.com/angopher/chronus/x"
+	"github.com/dgraph-io/badger/v2"
+	"github.com/dgraph-io/badger/v2/options"
+	"github.com/dgraph-io/dgraph/raftwal"
+	"github.com/influxdata/influxdb/services/meta"
+	"go.etcd.io/etcd/pkg/wait"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
+	"go.uber.org/zap"
+	"golang.org/x/net/trace"
 )
 
 var errInternalRetry = errors.New("Retry Raft proposal internally")
@@ -121,9 +123,9 @@ type RaftNode struct {
 	ID   uint64
 	Node raft.Node
 
-	MetaCli MetaClient
+	MetaStore MetaStore
 	//用于Continuous query
-	leases *meta.Leases
+	leases *ClusterLeases
 
 	//raft集群内部配置状态
 	RaftConfState *raftpb.ConfState
@@ -139,7 +141,8 @@ type RaftNode struct {
 	Config Config
 
 	//用于存储raft日志和snapshot
-	Storage *raftwal.DiskStorage
+	Storage  *raftwal.DiskStorage
+	walStore *badger.DB
 
 	//节点之间的通信模块
 	Transport interface {
@@ -173,25 +176,32 @@ type RaftNode struct {
 	//only for test
 	ApplyCallBack func(proposal *internal.Proposal, index uint64)
 
-	Logger *zap.Logger
+	Logger        *zap.Logger
+	SugaredLogger *zap.SugaredLogger
 }
 
-func NewRaftNode(config Config) *RaftNode {
+func NewRaftNode(config Config, logger *zap.Logger) *RaftNode {
 	c := &raft.Config{
 		ID:              config.RaftId,
 		ElectionTick:    config.ElectionTick,
 		HeartbeatTick:   config.HeartbeatTick,
 		MaxSizePerMsg:   config.MaxSizePerMsg,
 		MaxInflightMsgs: config.MaxInflightMsgs,
+		Logger:          newRaftLoggerBridge(logger),
 	}
 
-	walDir := config.WalDir
-	x.Checkf(os.MkdirAll(walDir, 0700), "Error while creating WAL dir.")
-	kvOpt := badger.DefaultOptions
+	x.Checkf(os.MkdirAll(config.WalDir, 0700), "Error while creating WAL dir.")
+	kvOpt := badger.DefaultOptions(config.WalDir)
 	kvOpt.SyncWrites = true
-	kvOpt.Dir = config.WalDir
-	kvOpt.ValueDir = config.WalDir
+	kvOpt.Logger = NewBadgerLoggerBridge(logger)
 	kvOpt.TableLoadingMode = options.MemoryMap
+	kvOpt.ValueLogFileSize = 8 << 20
+	kvOpt.MaxTableSize = 8 << 20
+	kvOpt.NumLevelZeroTables = 2
+	kvOpt.NumMemtables = 4
+	kvOpt.LevelSizeMultiplier = 5
+	kvOpt.LevelOneSize = 32 << 20
+	kvOpt.NumCompactors = 2
 
 	walStore, err := badger.Open(kvOpt)
 	x.Checkf(err, "Error while creating badger KV WAL store")
@@ -210,13 +220,17 @@ func NewRaftNode(config Config) *RaftNode {
 	//storage := raft.NewMemoryStorage()
 	storage := raftwal.Init(walStore, c.ID, 0)
 	c.Storage = storage
+	selfLogger := logger.With(zap.String("raftmeta", "RaftNode"))
 	return &RaftNode{
-		leases:        meta.NewLeases(meta.DefaultLeaseDuration),
+		leases:        NewClusterLeases(meta.DefaultLeaseDuration, selfLogger),
 		ID:            c.ID,
 		RaftConfig:    c,
+		Logger:        selfLogger,
+		SugaredLogger: selfLogger.Sugar(),
 		Config:        config,
 		RaftCtx:       rc,
 		Storage:       storage,
+		walStore:      walStore,
 		Done:          make(chan struct{}),
 		props:         newProposals(),
 		rand:          rand.New(&lockedSource{src: rand.NewSource(time.Now().UnixNano())}),
@@ -228,8 +242,81 @@ func NewRaftNode(config Config) *RaftNode {
 	}
 }
 
-func (s *RaftNode) WithLogger(log *zap.Logger) {
-	s.Logger = log.With(zap.String("raftmeta", "RaftNode"))
+func (s *RaftNode) resetPeersInSnapshot(snapshot *raftpb.Snapshot) error {
+	var sndata internal.SnapshotData
+	err := json.Unmarshal(snapshot.Data, &sndata)
+	if err != nil {
+		return err
+	}
+	sndata.PeersAddr = make(map[uint64]string)
+	for _, p := range s.Config.Peers {
+		sndata.PeersAddr[p.RaftId] = p.Addr
+	}
+	snapshot.Data, err = json.Marshal(&sndata)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *RaftNode) Restore(filePath string) error {
+	f, err := os.OpenFile(filePath, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return err
+	}
+	s.Logger.Warn("Restore from snapfile", zap.String("file", filePath), zap.Int64("size", info.Size()))
+	snapdata := make([]byte, info.Size())
+	_, err = io.ReadFull(f, snapdata)
+	if err != nil {
+		return err
+	}
+	snapshot := raftpb.Snapshot{}
+	err = json.Unmarshal(snapdata, &snapshot)
+	if err != nil {
+		return err
+	}
+	s.Logger.Warn(fmt.Sprintf(
+		"Term=%d, Index=%d",
+		snapshot.Metadata.Term,
+		snapshot.Metadata.Index,
+	))
+	if s.RaftConfState == nil {
+		return errors.New("ConfState has not been set yet")
+	}
+	snapshot.Metadata.ConfState = *s.RaftConfState
+	s.Logger.Warn(fmt.Sprintf(
+		"Voters=%v, Learners=%v",
+		snapshot.Metadata.ConfState.Voters,
+		snapshot.Metadata.ConfState.Learners,
+	))
+	err = s.resetPeersInSnapshot(&snapshot)
+	if err != nil {
+		return err
+	}
+	return s.Storage.Save(raftpb.HardState{}, []raftpb.Entry{}, snapshot)
+}
+
+func (s *RaftNode) Dump(filePath string) error {
+	f, err := os.OpenFile(filePath, os.O_WRONLY|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sp, err := s.Storage.Snapshot()
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(&sp)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	return err
 }
 
 // uniqueKey is meant to be unique across all the replicas.
@@ -264,14 +351,14 @@ func (s *RaftNode) leaderChangedNotify() <-chan struct{} {
 	return s.leaderChanged
 }
 
-func (s *RaftNode) restoreFromSnapshot() {
+func (s *RaftNode) restoreFromSnapshot() bool {
 	s.Logger.Info("restore from snapshot")
 	sp, err := s.Storage.Snapshot()
 	x.Checkf(err, "Unable to get existing snapshot")
 
 	if raft.IsEmptySnap(sp) {
 		s.Logger.Info("empty snapshot. ignore")
-		return
+		return false
 	}
 	s.SetConfState(&sp.Metadata.ConfState)
 	s.setAppliedIndex(sp.Metadata.Index)
@@ -286,12 +373,34 @@ func (s *RaftNode) restoreFromSnapshot() {
 	err = metaData.UnmarshalBinary(sndata.Data)
 	x.Checkf(err, "meta data UnmarshalBinary fail")
 
-	err = s.MetaCli.ReplaceData(metaData)
+	err = s.MetaStore.ReplaceData(metaData)
 	x.Checkf(err, "meta cli ReplaceData fail")
+
+	return true
+}
+
+func (s *RaftNode) resetPeersFromConfig() {
+	for _, peer := range s.Config.Peers {
+		s.Transport.SetPeer(peer.RaftId, peer.Addr)
+	}
+}
+
+func (s *RaftNode) reclaimDiskSpace() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.walStore.RunValueLogGC(0.5)
+		case <-s.Done:
+			return
+		}
+	}
 }
 
 func (s *RaftNode) InitAndStartNode() {
-	peers := []raft.Peer{}
+	peers := make([]raft.Peer, 0, len(s.Config.Peers))
 	for _, p := range s.Config.Peers {
 		rc := internal.RaftContext{Addr: p.Addr, ID: p.RaftId}
 		data, err := json.Marshal(&rc)
@@ -305,8 +414,11 @@ func (s *RaftNode) InitAndStartNode() {
 
 	if restart {
 		s.Logger.Info("Restarting node")
-		s.restoreFromSnapshot()
+		restored := s.restoreFromSnapshot()
 		s.Node = raft.RestartNode(s.RaftConfig)
+		if !restored {
+			s.resetPeersFromConfig()
+		}
 	} else {
 		s.Logger.Info("Starting node")
 		if len(peers) == 0 {
@@ -315,7 +427,7 @@ func (s *RaftNode) InitAndStartNode() {
 			x.Check(err)
 			s.Node = raft.StartNode(s.RaftConfig, []raft.Peer{{ID: s.ID, Context: data}})
 		} else {
-			rpeers := make([]raft.Peer, 0)
+			rpeers := make([]raft.Peer, 0, len(s.Config.Peers))
 			for _, peer := range s.Config.Peers {
 				rpeers = append(rpeers, raft.Peer{ID: uint64(peer.RaftId)})
 			}
@@ -323,13 +435,7 @@ func (s *RaftNode) InitAndStartNode() {
 			//x.Checkf(err, "join peers fail")
 			//s.Logger.Info("join peers success")
 			s.Node = raft.StartNode(s.RaftConfig, rpeers)
-
-			for _, peer := range s.Config.Peers {
-				if peer.RaftId != s.ID {
-					s.Transport.SetPeer(peer.RaftId, peer.Addr)
-				}
-			}
-
+			s.resetPeersFromConfig()
 		}
 	}
 }
@@ -357,6 +463,8 @@ func (s *RaftNode) Run() {
 	t := time.NewTicker(time.Duration(s.Config.TickTimeMs) * time.Millisecond)
 	defer t.Stop()
 
+	go s.reclaimDiskSpace()
+
 	var leader uint64
 
 	for {
@@ -364,8 +472,10 @@ func (s *RaftNode) Run() {
 		case <-snapshotTicker.C:
 			if leader == s.ID {
 				go func() {
-					err := s.trigerSnapshot()
-					s.Logger.Error("calculateSnapshot fail", zap.Error(err))
+					err := s.triggerSnapshot()
+					if err != nil {
+						s.Logger.Error("calculateSnapshot fail", zap.Error(err))
+					}
 				}()
 			}
 		case <-checkSumTicker.C:
@@ -411,7 +521,7 @@ func (s *RaftNode) Run() {
 				s.applyCh <- ew
 			}
 			for _, entry := range rd.CommittedEntries {
-				s.Logger.Info("process entry", zap.Uint64("term", entry.Term), zap.Uint64("index", entry.Index), zap.String("type", entry.Type.String()))
+				s.Logger.Debug("process entry", zap.Uint64("term", entry.Term), zap.Uint64("index", entry.Index), zap.String("type", entry.Type.String()))
 				ew := &internal.EntryWrapper{Entry: entry, Restore: false}
 				s.applyCh <- ew
 			}
@@ -429,7 +539,7 @@ func (s *RaftNode) Run() {
 
 //TODO:optimize
 func (s *RaftNode) triggerChecksum() {
-	s.Logger.Info("trigger check sum")
+	s.Logger.Info("trigger checksum")
 
 	if s.lastChecksum.needVerify {
 		go func() {
@@ -462,8 +572,8 @@ func (s *RaftNode) triggerChecksum() {
 	}
 }
 
-func (s *RaftNode) trigerSnapshot() error {
-	s.Logger.Info("trigerSnapshot")
+func (s *RaftNode) triggerSnapshot() error {
+	s.Logger.Info("triggerSnapshot")
 	var sn internal.CreateSnapshot
 	//_, err = s.Storage.LastIndex()
 	//x.Check(err)
@@ -506,7 +616,7 @@ func (s *RaftNode) processApplyCh() {
 					x.Fatalf("Unable to unmarshal proposal: %v %q\n", err, e.Data)
 				}
 				err := s.applyCommitted(proposal, e.Index)
-				s.Logger.Info("Applied proposal", zap.String("key", proposal.Key), zap.Uint64("index", e.Index), zap.Error(err))
+				s.Logger.Debug("Applied proposal", zap.String("key", proposal.Key), zap.Uint64("index", e.Index), zap.Error(err))
 
 				s.props.Done(proposal.Key, err)
 			}
@@ -561,12 +671,15 @@ func (s *RaftNode) ProposeConfChange(ctx context.Context, cc raftpb.ConfChange) 
 }
 
 func (s *RaftNode) ProposeAndWait(ctx context.Context, proposal *internal.Proposal, retData interface{}) error {
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	che := make(chan error, 1)
+	if _, ok := ctx.Deadline(); !ok {
+		// introduce timeout if needed
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+	}
 	pctx := &proposalCtx{
-		ch:      che,
-		ctx:     cctx,
+		ch:      make(chan error, 1),
+		ctx:     ctx,
 		retData: retData,
 	}
 	key := s.uniqueKey()
@@ -581,7 +694,7 @@ func (s *RaftNode) ProposeAndWait(ctx context.Context, proposal *internal.Propos
 	data, err := json.Marshal(proposal)
 	x.Check(err)
 
-	if err = s.Propose(cctx, data); err != nil {
+	if err = s.Propose(ctx, data); err != nil {
 		return x.Wrapf(err, "While proposing")
 	}
 
@@ -590,22 +703,21 @@ func (s *RaftNode) ProposeAndWait(ctx context.Context, proposal *internal.Propos
 	}
 
 	select {
-	case err = <-che:
+	case err = <-pctx.ch:
 		// We arrived here by a call to n.props.Done().
 		if tr, ok := trace.FromContext(ctx); ok {
 			tr.LazyPrintf("Done with error: %v", err)
 		}
 		return err
 	case <-ctx.Done():
-		if tr, ok := trace.FromContext(ctx); ok {
-			tr.LazyPrintf("External context timed out with error: %v.", ctx.Err())
+		if ctx.Err() == context.DeadlineExceeded {
+			if tr, ok := trace.FromContext(ctx); ok {
+				tr.LazyPrintf("Propose timed out.")
+			}
+			return errInternalRetry
 		}
+
 		return ctx.Err()
-	case <-cctx.Done():
-		if tr, ok := trace.FromContext(ctx); ok {
-			tr.LazyPrintf("Internal context timed out with error: %v. Retrying...", cctx.Err())
-		}
-		return errInternalRetry
 	}
 }
 
@@ -642,4 +754,8 @@ func (s *RaftNode) PastLife() (idx uint64, restart bool, rerr error) {
 		restart = true
 	}
 	return
+}
+
+func (s *RaftNode) ShouldTryAcquireLease(name string, nodeId uint64) bool {
+	return s.leases.ShouldTry(name, nodeId)
 }

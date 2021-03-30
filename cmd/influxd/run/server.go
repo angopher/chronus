@@ -30,9 +30,9 @@ import (
 	"github.com/influxdata/influxdb/services/storage"
 	"github.com/influxdata/influxdb/services/subscriber"
 	"github.com/influxdata/influxdb/services/udp"
+	"github.com/influxdata/influxdb/storage/reads"
 	"github.com/influxdata/influxdb/tcp"
 	"github.com/influxdata/influxdb/tsdb"
-	"github.com/influxdata/platform/storage/reads"
 	client "github.com/influxdata/usage-client/v1"
 	"go.uber.org/zap"
 
@@ -45,6 +45,7 @@ import (
 	"github.com/angopher/chronus/services/controller"
 	"github.com/angopher/chronus/services/hh"
 	imeta "github.com/angopher/chronus/services/meta"
+	"github.com/angopher/chronus/x"
 )
 
 var startTime time.Time
@@ -73,7 +74,8 @@ type Server struct {
 	BindAddress string
 	Listener    net.Listener
 
-	Logger *zap.Logger
+	Logger      *zap.Logger
+	SugarLogger *zap.SugaredLogger
 
 	Node              *influxdb.Node
 	ClusterMetaClient *coordinator.ClusterMetaClient
@@ -101,6 +103,8 @@ type Server struct {
 	CPUProfile string
 	MemProfile string
 
+	clusterExecutor *coordinator.ClusterExecutor
+
 	// httpAPIAddr is the host:port combination for the main HTTP API for querying and writing data
 	httpAPIAddr string
 
@@ -122,7 +126,7 @@ func updateTLSConfig(into **tls.Config, with *tls.Config) {
 }
 
 // NewServer returns a new instance of Server built from a config.
-func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
+func NewServer(c *Config, buildInfo *BuildInfo, logger *zap.Logger) (*Server, error) {
 	// First grab the base tls config we will use for all clients and servers
 	tlsConfig, err := c.TLS.Parse()
 	if err != nil {
@@ -186,7 +190,8 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 
 		Node: node,
 
-		Logger: logger.New(os.Stderr),
+		Logger:      logger,
+		SugarLogger: logger.Sugar(),
 
 		ClusterMetaClient: coordinator.NewMetaClient(c.Meta, c.Coordinator, nodeID),
 
@@ -205,23 +210,15 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 	if err := s.ClusterMetaClient.Open(); err != nil {
 		return nil, err
 	}
-
-	wait := s.ClusterMetaClient.WaitForDataChanged()
-	go s.ClusterMetaClient.RunSyncLoop()
-	//wait sync meta data from meta server
-	select {
-	case <-time.After(5 * time.Second):
-		//TODO:
-		panic("sync meta data failed")
-	case <-wait:
-	}
+	s.ClusterMetaClient.Start()
 
 	// If we've already created a data node for our id, we're done
 	n, err := s.ClusterMetaClient.DataNode(nodeID)
 	if err != nil {
+		s.Logger.Warn(fmt.Sprintf("Node id(%d) from store can't be used, try to create new", nodeID), zap.Error(err))
 		n, err = s.ClusterMetaClient.CreateDataNode(s.httpAPIAddr, s.tcpAddr)
 		if err != nil {
-			log.Printf("Unable to create data node. err: %s", err.Error())
+			s.Logger.Warn(fmt.Sprint("Unable to create data node. err: ", err.Error()))
 			return nil, err
 		}
 	}
@@ -242,11 +239,28 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 	s.Subscriber = subscriber.NewService(c.Subscriber)
 
 	// Initialize shard writer
-	s.ShardWriter = coordinator.NewShardWriter(time.Duration(s.config.Coordinator.WriteTimeout), s.config.Coordinator.PoolMaxConnections)
+	s.ShardWriter = coordinator.NewShardWriter(
+		time.Duration(s.config.Coordinator.WriteTimeout),
+		coordinator.NewClientPool(func(nodeId uint64) (x.ConnPool, error) {
+			return x.NewBoundedPool(
+				1,
+				100,
+				time.Duration(s.config.Coordinator.PoolMaxIdleTimeout),
+				time.Duration(s.config.Coordinator.DailTimeout),
+				coordinator.NewClientConnFactory(
+					nodeId,
+					time.Duration(s.config.Coordinator.DailTimeout),
+					s.ClusterMetaClient,
+				).Dial,
+			)
+		}),
+	)
+	s.ShardWriter.WithLogger(s.Logger)
 
 	// Create the hinted handoff service
 	s.HintedHandoff = hh.NewService(c.HintedHandoff, s.ShardWriter, s.ClusterMetaClient)
 	s.HintedHandoff.Monitor = s.Monitor
+	s.HintedHandoff.WithLogger(s.Logger)
 
 	// Initialize points writer.
 	s.PointsWriter = coordinator.NewPointsWriter()
@@ -257,10 +271,28 @@ func NewServer(c *Config, buildInfo *BuildInfo) (*Server, error) {
 	s.PointsWriter.HintedHandoff = s.HintedHandoff
 
 	// Initialize cluster extecutor
-	clusterExecutor := coordinator.NewClusterExecutor(s.Node, s.TSDBStore, s.ClusterMetaClient, s.config.Coordinator)
+	clusterExecutor := coordinator.NewClusterExecutor(
+		s.Node, s.TSDBStore,
+		s.ClusterMetaClient,
+		coordinator.NewClientPool(func(nodeId uint64) (x.ConnPool, error) {
+			return x.NewBoundedPool(
+				x.Max(1, s.config.Coordinator.PoolMinStreamsPerNode),
+				s.config.Coordinator.PoolMaxStreamsPerNode,
+				time.Duration(s.config.Coordinator.PoolMaxIdleTimeout),
+				time.Duration(s.config.Coordinator.DailTimeout),
+				coordinator.NewClientConnFactory(
+					nodeId,
+					time.Duration(s.config.Coordinator.DailTimeout),
+					s.ClusterMetaClient,
+				).Dial,
+			)
+		}),
+		s.config.Coordinator,
+	)
 	clusterExecutor.WithLogger(s.Logger)
 
 	// Initialize query executor.
+	s.clusterExecutor = clusterExecutor
 	s.QueryExecutor = query.NewExecutor()
 	s.QueryExecutor.StatementExecutor = &influxdb_coordinator.StatementExecutor{
 		MetaClient:  s.ClusterMetaClient,
@@ -446,15 +478,7 @@ func (s *Server) appendControllerService(c controller.Config) {
 	srv.MetaClient = s.ClusterMetaClient
 	srv.Node = s.Node
 	srv.TSDBStore = s.TSDBStore
-	shardCopier := &controller.ShardCopier{
-		Manager:    controller.NewCopyManager(c.MaxShardCopyTasks),
-		MetaClient: s.ClusterMetaClient,
-		TSDBStore:  s.TSDBStore,
-		Node:       s.Node,
-	}
-	shardCopier.WithLogger(s.Logger)
 
-	srv.ShardCopier = shardCopier
 	s.ControllerService = srv
 	s.Services = append(s.Services, srv)
 }
@@ -559,6 +583,8 @@ func (s *Server) Open() error {
 	if !s.reportingDisabled {
 		go s.startServerReporting()
 	}
+
+	go s.poolStatsLoop()
 
 	return nil
 }
@@ -667,6 +693,36 @@ func (s *Server) reportServer() {
 	s.Logger.Info("Sending usage statistics to usage.influxdata.com")
 
 	go cl.Save(usage)
+}
+
+func dumpPoolStats(name string, sugar *zap.SugaredLogger, stats []coordinator.StatEntity) {
+	sugar.Info("Dump statistics of ", name)
+	sugar.Info("active/idle/capacity, success/cost(ms), failure/cost(ms), return/close")
+	for _, stat := range stats {
+		sugar.Infof("Node %d: %d/%d/%d, %d/%d, %d/%d, %d/%d",
+			stat.NodeId,
+			stat.Stat.Active, stat.Stat.Idle, stat.Stat.Capacity,
+			stat.Stat.GetSuccessCnt, stat.Stat.GetSuccessMillis,
+			stat.Stat.GetFailureCnt, stat.Stat.GetFailureMillis,
+			stat.Stat.ReturnCnt, stat.Stat.CloseCnt,
+		)
+	}
+}
+
+func (s *Server) poolStatsLoop() {
+	ticker := time.NewTicker(120 * time.Second)
+
+LOOP:
+	for {
+		select {
+		case <-ticker.C:
+			dumpPoolStats("remote executors", s.SugarLogger, s.clusterExecutor.RemoteNodeExecutor.Stats())
+			dumpPoolStats("shard writers", s.SugarLogger, s.ShardWriter.Stats())
+		case <-s.closing:
+			//shutdown
+			break LOOP
+		}
+	}
 }
 
 // Service represents a service attached to the server.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -15,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/angopher/chronus/logging"
 	"github.com/influxdata/influxdb/logger"
 	"go.uber.org/zap"
 )
@@ -88,10 +88,14 @@ func (cmd *Command) Run(args ...string) error {
 		return fmt.Errorf("%s. To generate a valid configuration file run `influxd config > influxdb.generated.conf`", err)
 	}
 
-	var logErr error
-	if cmd.Logger, logErr = config.Logging.New(cmd.Stderr); logErr != nil {
-		// assign the default logger
-		cmd.Logger = logger.New(cmd.Stderr)
+	cmd.Logger, err = logging.InitialLogging(&logging.Config{
+		Format:   config.Logging.Format,
+		Level:    config.Logging.Level.String(),
+		Dir:      options.LogDir,
+		FileName: "influxd.log",
+	})
+	if err != nil {
+		return fmt.Errorf("%s. Initialize logging failed", err)
 	}
 
 	// Attempt to run pprof on :6060 before startup if debug pprof enabled.
@@ -115,11 +119,6 @@ func (cmd *Command) Run(args ...string) error {
 		zap.String("version", runtime.Version()),
 		zap.Int("maxprocs", runtime.GOMAXPROCS(0)))
 
-	// If there was an error on startup when creating the logger, output it now.
-	if logErr != nil {
-		cmd.Logger.Error("Unable to configure logger", zap.Error(logErr))
-	}
-
 	// Write the PID file.
 	if err := cmd.writePIDFile(options.PIDFile); err != nil {
 		return fmt.Errorf("write pid file: %s", err)
@@ -139,11 +138,10 @@ func (cmd *Command) Run(args ...string) error {
 		Branch:  cmd.Branch,
 		Time:    cmd.BuildTime,
 	}
-	s, err := NewServer(config, buildInfo)
+	s, err := NewServer(config, buildInfo, cmd.Logger)
 	if err != nil {
 		return fmt.Errorf("create server: %s", err)
 	}
-	s.Logger = cmd.Logger
 	s.CPUProfile = options.CPUProfile
 	s.MemProfile = options.MemProfile
 	if err := s.Open(); err != nil {
@@ -169,11 +167,10 @@ func (cmd *Command) Close() error {
 }
 
 func (cmd *Command) monitorServerErrors() {
-	logger := log.New(cmd.Stderr, "", log.LstdFlags)
 	for {
 		select {
 		case err := <-cmd.Server.Err():
-			logger.Println(err)
+			cmd.Logger.Error(err.Error())
 		case <-cmd.closing:
 			return
 		}
@@ -198,6 +195,7 @@ func (cmd *Command) ParseFlags(args ...string) (Options, error) {
 	_ = fs.String("hostname", "", "")
 	fs.StringVar(&options.CPUProfile, "cpuprofile", "", "")
 	fs.StringVar(&options.MemProfile, "memprofile", "", "")
+	fs.StringVar(&options.LogDir, "logdir", "", "Log to specified directory")
 	fs.Usage = func() { fmt.Fprintln(cmd.Stderr, usage) }
 	if err := fs.Parse(args); err != nil {
 		return Options{}, err
@@ -262,6 +260,8 @@ Usage: influxd run [flags]
             Write CPU profiling information to a file.
     -memprofile <path>
             Write memory usage information to a file.
+    -logdir <path>
+            Write logs to specified path
 `
 
 // Options represents the command line options that can be parsed.
@@ -270,6 +270,7 @@ type Options struct {
 	PIDFile    string
 	CPUProfile string
 	MemProfile string
+	LogDir     string
 }
 
 // GetConfigPath returns the config path from the options.

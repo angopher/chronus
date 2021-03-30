@@ -621,6 +621,10 @@ func (l *segment) lastModified() (time.Time, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
+	if l.file == nil {
+		return time.Time{}, os.ErrNotExist
+	}
+
 	stats, err := os.Stat(l.file.Name())
 	if err != nil {
 		return time.Time{}, err

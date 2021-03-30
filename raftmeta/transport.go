@@ -5,17 +5,39 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/angopher/chronus/raftmeta/internal"
-	"github.com/angopher/chronus/x"
-	"github.com/coreos/etcd/raft"
-	"github.com/coreos/etcd/raft/raftpb"
-	"go.uber.org/zap"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/angopher/chronus/raftmeta/internal"
+	"github.com/angopher/chronus/x"
+	"go.etcd.io/etcd/raft"
+	"go.etcd.io/etcd/raft/raftpb"
+	"go.uber.org/zap"
+	"golang.org/x/time/rate"
+)
+
+var (
+	loggingLimiter = rate.NewLimiter(1, 1)
+	httpClient     = http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   10 * time.Second,
+				KeepAlive: 30 * time.Second,
+				DualStack: true,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
 )
 
 type Transport struct {
@@ -87,7 +109,7 @@ func (t *Transport) SendMessage(messages []raftpb.Message) {
 		}
 		url := fmt.Sprintf("http://%s/message", addr)
 		err = Request(url, data)
-		if err != nil {
+		if err != nil && loggingLimiter.Allow() {
 			t.Logger.Error("Request fail:", zap.Error(err), zap.String("url", url))
 		}
 	}
@@ -117,14 +139,17 @@ func (s *RaftNode) HandleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 	resp := &CommonResp{}
 	resp.RetCode = -1
 	resp.RetMsg = "fail"
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	defer WriteResp(w, &resp)
 
 	var err error
+	peers := s.Transport.ClonePeers()
 	typ := raftpb.ConfChangeAddNode
 	data := []byte{}
 	var nodeId uint64
 	op := r.FormValue("op")
-	if op == "add" || op == "update" {
+	switch op {
+	case "add", "update":
 		data, err = ioutil.ReadAll(r.Body)
 		if err != nil {
 			resp.RetMsg = err.Error()
@@ -134,11 +159,37 @@ func (s *RaftNode) HandleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		err = json.Unmarshal(data, &rc)
 		x.Check(err)
 		nodeId = rc.ID
-	} else if op == "remove" {
-		typ = raftpb.ConfChangeRemoveNode
+
+		// check addr
+		for _, addr := range peers {
+			if addr == rc.Addr {
+				resp.RetMsg = "specified node address already exists"
+				return
+			}
+		}
+
+		// check node id
+		switch op {
+		case "add":
+			if _, ok := peers[nodeId]; ok {
+				resp.RetMsg = fmt.Sprintf("specified node id already exists: %d", nodeId)
+				return
+			}
+		case "update":
+			if _, ok := peers[nodeId]; !ok {
+				resp.RetMsg = fmt.Sprintf("specified node id doesn't exist: %d", nodeId)
+				return
+			}
+		}
+	case "remove":
 		nodeId, err = strconv.ParseUint(r.FormValue("node_id"), 10, 64)
+		if _, ok := peers[nodeId]; !ok {
+			resp.RetMsg = fmt.Sprintf("unkown node id: %d", nodeId)
+			return
+		}
+		typ = raftpb.ConfChangeRemoveNode
 		x.Check(err)
-	} else {
+	default:
 		resp.RetMsg = fmt.Sprintf("unkown op:%s", op)
 		return
 	}
@@ -159,8 +210,95 @@ func (s *RaftNode) HandleUpdateCluster(w http.ResponseWriter, r *http.Request) {
 		resp.RetMsg = err.Error()
 		return
 	}
+	if op == "add" {
+		// trigger a new snapshot, make sure the new node is existed in snapshot sent later.
+		s.triggerSnapshot()
+	}
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
+}
+
+func (s *RaftNode) HandleStatusNode(w http.ResponseWriter, r *http.Request) {
+	resp := &StatusNodeResp{}
+	resp.RetCode = -1
+	resp.RetMsg = "fail"
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	defer WriteResp(w, &resp)
+
+	peers := s.Transport.ClonePeers()
+	status := s.Node.Status()
+	resp.Status.ID = status.ID
+	resp.Status.Vote = status.Vote
+	resp.Status.Match = status.Applied
+	resp.Status.Next = resp.Status.Match + 1
+	resp.Status.Role = strings.Replace(status.RaftState.String(), "State", "", 1)
+	if addr, ok := peers[status.ID]; ok {
+		resp.Status.Addr = addr
+	}
+	resp.RetCode = 0
+	resp.RetMsg = "ok"
+}
+
+func (s *RaftNode) HandleStatusCluster(w http.ResponseWriter, r *http.Request) {
+	resp := &StatusClusterResp{}
+	resp.RetCode = -1
+	resp.RetMsg = "fail"
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	defer WriteResp(w, &resp)
+
+	peers := s.Transport.ClonePeers()
+	leader := s.Node.Status().Lead
+	if leader != s.ID {
+		// forward
+		if r.URL.Query().Get("forward") == "1" {
+			resp.RetMsg = "Error forwarding"
+			return
+		}
+		if addr, ok := peers[leader]; ok {
+			r, err := forwardStatusCluster(addr)
+			if err != nil {
+				resp.RetMsg = err.Error()
+			} else {
+				resp = r
+			}
+		}
+		return
+	}
+	nodes := make([]NodeStatus, 0, len(peers))
+	status := s.Node.Status()
+	prs := status.Progress
+	for id, addr := range peers {
+		idx := len(nodes)
+		nodes = append(nodes, NodeStatus{
+			ID:       id,
+			Addr:     addr,
+			Match:    0,
+			Next:     0,
+			Role:     "Unreachable",
+			Progress: "Unreachable",
+		})
+
+		nodeStatus, err := statusPeer(addr)
+		if err != nil {
+			continue
+		}
+		nodes[idx].Role = nodeStatus.Role
+		nodes[idx].Vote = nodeStatus.Vote
+
+		if pr, ok := prs[id]; ok {
+			nodes[idx].Match = pr.Match
+			nodes[idx].Next = pr.Next
+			nodes[idx].Progress = strings.Replace(pr.State.String(), "ProgressState", "", 1)
+		}
+	}
+
+	resp.RetCode = 0
+	resp.RetMsg = "ok"
+	resp.Nodes = nodes
+	resp.Applied = status.Applied
+	resp.Commit = status.Commit
+	resp.Leader = status.Lead
+	resp.Term = status.Term
 }
 
 func (s *RaftNode) HandleMessage(w http.ResponseWriter, r *http.Request) {
@@ -176,45 +314,67 @@ func (s *RaftNode) HandleMessage(w http.ResponseWriter, r *http.Request) {
 	err = msg.Unmarshal(data)
 	x.Check(err)
 	if msg.Type != raftpb.MsgHeartbeat && msg.Type != raftpb.MsgHeartbeatResp {
-		s.Logger.Info("recv message", zap.String("type", msg.Type.String()))
+		s.Logger.Debug("recv message", zap.String("type", msg.Type.String()))
 	}
 	s.RecvRaftRPC(context.Background(), msg)
 }
 
-func Request(url string, data []byte) error {
+func postRequest(url string, data []byte) ([]byte, error) {
 	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Connection", "close")
 
-	client := http.Client{
-		Transport: &http.Transport{
-			Dial: func(netw, addr string) (net.Conn, error) {
-				deadline := time.Now().Add(10 * time.Second) //TODO: timeout from config
-				c, err := net.DialTimeout(netw, addr, time.Second)
-				if err != nil {
-					return nil, err
-				}
-				c.SetDeadline(deadline)
-				return c, nil
-			},
-		},
-	}
-
-	res, err := client.Do(req)
+	res, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer res.Body.Close()
 	resData, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	return resData, nil
+}
+
+func forwardStatusCluster(addr string) (*StatusClusterResp, error) {
+	data, err := postRequest(fmt.Sprint("http://", addr, "/status_cluster?forward=1"), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &StatusClusterResp{}
+	resp.RetCode = -1
+	resp.RetMsg = "fail"
+	err = json.Unmarshal(data, resp)
+	return resp, nil
+}
+
+func statusPeer(addr string) (*NodeStatus, error) {
+	data, err := postRequest(fmt.Sprint("http://", addr, "/status_node"), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := &StatusNodeResp{}
+	resp.RetCode = -1
+	resp.RetMsg = "fail"
+	err = json.Unmarshal(data, resp)
+	if resp.RetCode != 0 {
+		return nil, fmt.Errorf("fail. err:%s", resp.RetMsg)
+	}
+	return &resp.Status, nil
+}
+
+func Request(url string, data []byte) error {
+	data, err := postRequest(url, data)
 	if err != nil {
 		return err
 	}
 
 	resp := &CommonResp{RetCode: -1}
-	err = json.Unmarshal(resData, resp)
+	err = json.Unmarshal(data, resp)
 	if resp.RetCode != 0 {
 		return fmt.Errorf("fail. err:%s", resp.RetMsg)
 	}

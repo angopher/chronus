@@ -6,9 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"github.com/coreos/etcd/raft"
 	"sync"
 	"time"
+
+	"go.etcd.io/etcd/raft"
 )
 
 type Linearizabler struct {

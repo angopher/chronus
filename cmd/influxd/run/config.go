@@ -4,11 +4,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"os"
-	"os/user"
-	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 	"github.com/influxdata/influxdb/logger"
@@ -75,16 +73,24 @@ type Config struct {
 func NewConfig() *Config {
 	c := &Config{}
 	c.Meta = meta.NewConfig()
+	c.Meta.Dir = "./meta"
 	c.Data = tsdb.NewConfig()
+	c.Data.Dir = "./data"
+	c.Data.WALDir = "./wal"
+	c.Data.QueryLogEnabled = false
 	c.Coordinator = coordinator.NewConfig()
+	c.Coordinator.LogQueriesAfter = itoml.Duration(500 * time.Millisecond)
 	c.Precreator = precreator.NewConfig()
 
 	c.Monitor = monitor.NewConfig()
 	c.Subscriber = subscriber.NewConfig()
 	c.HTTPD = httpd.NewConfig()
+	c.HTTPD.AccessLogPath = "./logs/access.log"
 	c.Logging = logger.NewConfig()
 
 	c.HintedHandoff = hh.NewConfig()
+	c.HintedHandoff.Enabled = true
+	c.HintedHandoff.Dir = "./hh"
 	c.Controller = controller.NewConfig()
 
 	c.GraphiteInputs = []graphite.Config{graphite.NewConfig()}
@@ -93,6 +99,7 @@ func NewConfig() *Config {
 	c.UDPInputs = []udp.Config{udp.NewConfig()}
 
 	c.ContinuousQuery = continuous_querier.NewConfig()
+	c.ContinuousQuery.RunInterval = itoml.Duration(time.Minute)
 	c.Retention = retention.NewConfig()
 	c.BindAddress = DefaultBindAddress
 
@@ -103,20 +110,9 @@ func NewConfig() *Config {
 func NewDemoConfig() (*Config, error) {
 	c := NewConfig()
 
-	var homeDir string
-	// By default, store meta and data files in current users home directory
-	u, err := user.Current()
-	if err == nil {
-		homeDir = u.HomeDir
-	} else if os.Getenv("HOME") != "" {
-		homeDir = os.Getenv("HOME")
-	} else {
-		return nil, fmt.Errorf("failed to determine current user for storage")
-	}
-
-	c.Meta.Dir = filepath.Join(homeDir, ".influxdb/meta")
-	c.Data.Dir = filepath.Join(homeDir, ".influxdb/data")
-	c.Data.WALDir = filepath.Join(homeDir, ".influxdb/wal")
+	c.Meta.Dir = "./meta"
+	c.Data.Dir = "./data"
+	c.Data.WALDir = "./wal"
 
 	return c, nil
 }

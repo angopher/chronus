@@ -23,8 +23,8 @@ const (
 	// A value of zero will make the maximum query limit unlimited.
 	DefaultMaxConcurrentQueries = 0
 
-	DefaultPoolMaxIdleStreams = 100
-	DefaultPoolMaxConnections = 200
+	DefaultPoolMinStreamsPerNode = 5
+	DefaultPoolMaxStreamsPerNode = 200
 
 	// DefaultMaxSelectPointN is the maximum number of points a SELECT can process.
 	// A value of zero will make the maximum point count unlimited.
@@ -41,8 +41,8 @@ const (
 type Config struct {
 	DailTimeout               toml.Duration `toml:"dial-timeout"`
 	PoolMaxIdleTimeout        toml.Duration `toml:"pool-max-idle-time"`
-	PoolMaxIdleStreams        int           `toml:"pool-max-idle-streams"`
-	PoolMaxConnections        int           `toml:"pool-max-connections"`
+	PoolMinStreamsPerNode     int           `toml:"pool-min-streams-per-node"`
+	PoolMaxStreamsPerNode     int           `toml:"pool-max-streams-per-node"`
 	ShardReaderTimeout        toml.Duration `toml:"shard-reader-timeout"`
 	ClusterTracing            bool          `toml:"cluster-tracing"`
 	WriteTimeout              toml.Duration `toml:"write-timeout"`
@@ -61,8 +61,8 @@ func NewConfig() Config {
 	return Config{
 		DailTimeout:               toml.Duration(DefaultDialTimeout),
 		PoolMaxIdleTimeout:        toml.Duration(DefaultPoolMaxIdleTimeout),
-		PoolMaxIdleStreams:        DefaultPoolMaxIdleStreams,
-		PoolMaxConnections:        DefaultPoolMaxConnections,
+		PoolMinStreamsPerNode:     DefaultPoolMinStreamsPerNode,
+		PoolMaxStreamsPerNode:     DefaultPoolMaxStreamsPerNode,
 		ShardReaderTimeout:        toml.Duration(DefaultShardReaderTimeout),
 		ClusterTracing:            false,
 		WriteTimeout:              toml.Duration(DefaultWriteTimeout),
@@ -71,7 +71,7 @@ func NewConfig() Config {
 		MaxSelectPointN:           DefaultMaxSelectPointN,
 		MaxSelectSeriesN:          DefaultMaxSelectSeriesN,
 		MetaServices:              []string{DefaultMetaService},
-		PingMetaServiceIntervalMs: 50,
+		PingMetaServiceIntervalMs: 250,
 	}
 }
 
@@ -80,8 +80,8 @@ func (c Config) Diagnostics() (*diagnostics.Diagnostics, error) {
 	return diagnostics.RowFromMap(map[string]interface{}{
 		"dail-timeout":               c.DailTimeout,
 		"pool-max-idle-time":         c.PoolMaxIdleTimeout,
-		"pool-max-idle-streams":      c.PoolMaxIdleStreams,
-		"pool-max-connections":       c.PoolMaxConnections,
+		"pool-min-streams-per-node":  c.PoolMinStreamsPerNode,
+		"pool-max-streams-per-node":  c.PoolMaxStreamsPerNode,
 		"shard-reader-timeout":       c.ShardReaderTimeout,
 		"cluster-tracing":            c.ClusterTracing,
 		"write-timeout":              c.WriteTimeout,

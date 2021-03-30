@@ -3,43 +3,92 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+
 	"github.com/BurntSushi/toml"
+	"github.com/angopher/chronus/logging"
 	"github.com/angopher/chronus/raftmeta"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/angopher/chronus/x"
-	"github.com/influxdata/influxdb/logger"
 	"github.com/influxdata/influxdb/services/meta"
-	"os"
+	"go.etcd.io/etcd/raft/raftpb"
+	"go.uber.org/zap"
 )
 
 func main() {
-	configFile := flag.String("config", "", "-config config_file")
-	flag.Parse()
+	f := flag.NewFlagSet("metad", flag.ExitOnError)
+	configFile := f.String("config", "", "Specify config file")
+	dumpFile := f.String("dump", "", "Boot and dump the snapshot to a file specified")
+	restoreFile := f.String("restore", "", "Boot and restore data from the snapshot specified")
+	showSample := f.Bool("sample", false, "Show sample configuration")
+	f.Parse(os.Args[1:])
 
 	config := raftmeta.NewConfig()
-	if *configFile != "" {
-		x.Check((&config).FromTomlFile(*configFile))
-	} else {
+	if *showSample {
 		toml.NewEncoder(os.Stdout).Encode(&config)
+		fmt.Println()
 		return
 	}
 
-	fmt.Printf("config:%+v\n", config)
+	if *configFile != "" {
+		x.Check((&config).FromTomlFile(*configFile))
+	} else {
+		f.Usage()
+		return
+	}
 
 	metaCli := imeta.NewClient(&meta.Config{
 		RetentionAutoCreate: config.RetentionAutoCreate,
 		LoggingEnabled:      true,
 	})
+	log, err := logging.InitialLogging(&logging.Config{
+		Format:   config.LogFormat,
+		Level:    config.LogLevel,
+		Dir:      config.LogDir,
+		FileName: "metad.log",
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Error to initialize logging", err)
+		return
+	}
 
-	log := logger.New(os.Stderr)
+	suger := log.Sugar()
+	suger.Debug("config: %+v", config)
 
 	metaCli.WithLogger(log)
-	err := metaCli.Open()
+	err = metaCli.Open()
 	x.Check(err)
 
-	node := raftmeta.NewRaftNode(config)
-	node.MetaCli = metaCli
-	node.WithLogger(log)
+	node := raftmeta.NewRaftNode(config, log)
+	node.MetaStore = metaCli
+
+	// dump only
+	if *dumpFile != "" {
+		err := node.Dump(*dumpFile)
+		if err != nil {
+			fmt.Println("Dump to file error:", err)
+			return
+		}
+		fmt.Println("Dumped to", *dumpFile)
+		return
+	}
+
+	// restore
+	if *restoreFile != "" {
+		// set conf state first
+		var ids []uint64
+		for _, n := range node.Config.Peers {
+			ids = append(ids, n.RaftId)
+		}
+		node.SetConfState(&raftpb.ConfState{
+			Voters: ids,
+		})
+		err = node.Restore(*restoreFile)
+		if err != nil {
+			node.Logger.Warn("Restore from file failed", zap.Error(err))
+			return
+		}
+	}
 
 	t := raftmeta.NewTransport()
 	t.WithLogger(log)

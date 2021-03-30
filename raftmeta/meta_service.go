@@ -9,16 +9,43 @@ import (
 	"strings"
 	"time"
 
+	_ "net/http/pprof"
+
 	"github.com/angopher/chronus/raftmeta/internal"
 	imeta "github.com/angopher/chronus/services/meta"
 	"github.com/influxdata/influxdb/services/meta"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type CommonResp struct {
 	RetCode int    `json:"ret_code"`
 	RetMsg  string `json:"ret_msg"`
+}
+
+type NodeStatus struct {
+	ID       uint64 `json:"id"`
+	Addr     string `json:"addr"`
+	Vote     uint64 `json:"vote"`
+	Match    uint64 `json:"match"`
+	Next     uint64 `json:"next"`
+	Role     string `json:"role"`
+	Progress string `json:"progress"`
+}
+
+type StatusNodeResp struct {
+	CommonResp
+	Status NodeStatus `json:"status"`
+}
+
+type StatusClusterResp struct {
+	CommonResp
+	Term    uint64       `json:"term"`
+	Commit  uint64       `json:"commit"`
+	Applied uint64       `json:"applied"`
+	Leader  uint64       `json:"leader"`
+	Nodes   []NodeStatus `json:"nodes"`
 }
 
 type MetaService struct {
@@ -55,6 +82,12 @@ func (s *MetaService) InitRouter() {
 	http.HandleFunc("/update_cluster", func(w http.ResponseWriter, r *http.Request) {
 		s.Node.HandleUpdateCluster(w, r)
 	})
+	http.HandleFunc("/status_cluster", func(w http.ResponseWriter, r *http.Request) {
+		s.Node.HandleStatusCluster(w, r)
+	})
+	http.HandleFunc("/status_node", func(w http.ResponseWriter, r *http.Request) {
+		s.Node.HandleStatusNode(w, r)
+	})
 
 	initHttpHandler(s)
 }
@@ -77,18 +110,7 @@ func (s *MetaService) ProposeAndWait(msgType int, data []byte, retData interface
 	pr := &internal.Proposal{Type: msgType}
 	pr.Data = data
 
-	resCh := make(chan error)
-	go func() {
-		err := s.Node.ProposeAndWait(ctx, pr, retData)
-		resCh <- err
-	}()
-
-	var err error
-	select {
-	case err = <-resCh:
-	}
-
-	return err
+	return s.Node.ProposeAndWait(ctx, pr, retData)
 }
 
 type CreateDatabaseReq struct {
@@ -359,7 +381,7 @@ func (s *MetaService) DeleteDataNode(w http.ResponseWriter, r *http.Request) {
 
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("DeleteDataNode ok", zap.Uint64("id", req.Id))
+	s.Logger.Info(fmt.Sprintf("DeleteDataNode ok, id=%d", req.Id))
 }
 
 type RetentionPolicySpec struct {
@@ -566,6 +588,15 @@ func (s *MetaService) CreateUser(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error("CreateUser fail", zap.Error(err))
 		return
 	}
+	// regenerate data due to pre-hashed password
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("Hash user password fail", zap.Error(err))
+		return
+	}
+	req.Password = string(hash)
+	data, _ = json.Marshal(&req)
 
 	user := &meta.UserInfo{}
 	err = s.ProposeAndWait(internal.CreateUser, data, user)
@@ -573,7 +604,6 @@ func (s *MetaService) CreateUser(w http.ResponseWriter, r *http.Request) {
 		resp.RetMsg = err.Error()
 		s.Logger.Error("CreateUser fail",
 			zap.String("Name", req.Name),
-			zap.String("Password", req.Password),
 			zap.Bool("Admin", req.Admin),
 			zap.Error(err))
 		return
@@ -584,7 +614,6 @@ func (s *MetaService) CreateUser(w http.ResponseWriter, r *http.Request) {
 	resp.RetMsg = "ok"
 	s.Logger.Info("CreateUser ok",
 		zap.String("Name", req.Name),
-		zap.String("Password", req.Password),
 		zap.Bool("Admin", req.Admin))
 }
 
@@ -654,12 +683,20 @@ func (s *MetaService) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error("UpdateUser fail", zap.Error(err))
 		return
 	}
+	// regenerate data due to pre-hashed password
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("Hash user password fail", zap.Error(err))
+		return
+	}
+	req.Password = string(hash)
+	data, _ = json.Marshal(&req)
 
 	err = s.ProposeAndWait(internal.UpdateUser, data, nil)
 	if err != nil {
 		s.Logger.Error("UpdateUser fail",
 			zap.String("Name", req.Name),
-			zap.String("Password", req.Password),
 			zap.Error(err))
 		resp.RetMsg = err.Error()
 		return
@@ -668,8 +705,7 @@ func (s *MetaService) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
 	s.Logger.Info("UpdateUser ok",
-		zap.String("Name", req.Name),
-		zap.String("Password", req.Password))
+		zap.String("Name", req.Name))
 }
 
 type SetPrivilegeReq struct {
@@ -791,24 +827,18 @@ func (s *MetaService) Authenticate(w http.ResponseWriter, r *http.Request) {
 		s.Logger.Error("Authenticate fail", zap.Error(err))
 		return
 	}
-
-	user := &meta.UserInfo{}
-	err = s.ProposeAndWait(internal.Authenticate, data, user)
+	u, err := s.Node.MetaStore.Authenticate(req.UserName, req.Password)
 	if err != nil {
 		s.Logger.Error("Authenticate fail",
 			zap.String("UserName", req.UserName),
-			zap.String("Password", req.Password),
 			zap.Error(err))
 		resp.RetMsg = err.Error()
 		return
 	}
 
-	resp.UserInfo = *(user)
+	resp.UserInfo = *(u.(*meta.UserInfo))
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("Authenticate ok",
-		zap.String("UserName", req.UserName),
-		zap.String("Password", req.Password))
 }
 
 type AddShardOwnerReq struct {
@@ -979,6 +1009,10 @@ func (s *MetaService) TruncateShardGroups(w http.ResponseWriter, r *http.Request
 	s.Logger.Info("TruncateShardGroups ok", zap.Time("Time", req.Time))
 }
 
+type PruneShardGroupsReq struct {
+	Expiration time.Time
+}
+
 type PruneShardGroupsResp struct {
 	CommonResp
 }
@@ -989,7 +1023,11 @@ func (s *MetaService) PruneShardGroups(w http.ResponseWriter, r *http.Request) {
 	resp.RetMsg = "fail"
 	defer WriteResp(w, &resp)
 
-	err := s.ProposeAndWait(internal.PruneShardGroups, []byte{}, nil)
+	req := &PruneShardGroupsReq{
+		Expiration: time.Now().Add(imeta.SHARDGROUP_INFO_EVICTION),
+	}
+	data, _ := json.Marshal(req)
+	err := s.ProposeAndWait(internal.PruneShardGroups, data, nil)
 	if err != nil {
 		resp.RetMsg = err.Error()
 		s.Logger.Error("PruneShardGroups fail", zap.Error(err))
@@ -1006,6 +1044,7 @@ type DeleteShardGroupReq struct {
 	Database string
 	Policy   string
 	Id       uint64
+	Now      time.Time
 }
 type DeleteShardGroupResp struct {
 	CommonResp
@@ -1020,21 +1059,22 @@ func (s *MetaService) DeleteShardGroup(w http.ResponseWriter, r *http.Request) {
 	data, err := ioutil.ReadAll(r.Body)
 	if err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("TruncateShardGroups fail", zap.Error(err))
+		s.Logger.Error("DeleteShardGroup fail", zap.Error(err))
 		return
 	}
 
 	var req DeleteShardGroupReq
 	if err := json.Unmarshal(data, &req); err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("TruncateShardGroups fail", zap.Error(err))
+		s.Logger.Error("DeleteShardGroup fail", zap.Error(err))
 		return
 	}
+	req.Now = time.Now()
 
 	err = s.ProposeAndWait(internal.DeleteShardGroup, data, nil)
 	if err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("TruncateShardGroups fail",
+		s.Logger.Error("DeleteShardGroup fail",
 			zap.String("Database", req.Database),
 			zap.String("Policy", req.Policy),
 			zap.Uint64("Id", req.Id),
@@ -1044,7 +1084,7 @@ func (s *MetaService) DeleteShardGroup(w http.ResponseWriter, r *http.Request) {
 
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("TruncateShardGroups ok",
+	s.Logger.Info("DeleteShardGroup ok",
 		zap.String("Database", req.Database),
 		zap.String("Policy", req.Policy),
 		zap.Uint64("Id", req.Id))
@@ -1296,8 +1336,9 @@ func (s *MetaService) DropSubscription(w http.ResponseWriter, r *http.Request) {
 }
 
 type AcquireLeaseReq struct {
-	Name   string
-	NodeId uint64
+	Name        string
+	NodeId      uint64
+	RequestTime int64 // timestamp in millis
 }
 
 type AcquireLeaseResp struct {
@@ -1325,23 +1366,38 @@ func (s *MetaService) AcquireLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// do pre-check before proposing
+	if !s.Node.ShouldTryAcquireLease(req.Name, req.NodeId) {
+		resp.RetMsg = ErrAcquiredByOther.Error()
+		return
+	}
+
+	req.RequestTime = time.Now().UnixNano() / 1e6
+	data, _ = json.Marshal(&req)
+
 	lease := &meta.Lease{}
 	err = s.ProposeAndWait(internal.AcquireLease, data, lease)
 	if err != nil {
 		resp.RetMsg = err.Error()
-		s.Logger.Error("AcquireLease fail",
-			zap.String("Name", req.Name),
-			zap.Uint64("NodeId", req.NodeId),
-			zap.Error(err))
+		if !strings.Contains(err.Error(), "another node has the lease") {
+			s.Logger.Error(
+				fmt.Sprintf(
+					"AcquireLease fail, name=%s, node=%d",
+					req.Name, req.NodeId,
+				),
+				zap.Error(err),
+			)
+		}
 		return
 	}
 
 	resp.Lease = *lease
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
-	s.Logger.Info("AcquireLease ok",
+	s.Logger.Debug("AcquireLease ok",
 		zap.String("Name", req.Name),
-		zap.Uint64("NodeId", req.NodeId))
+		zap.Uint64("NodeId", req.NodeId),
+	)
 }
 
 type DataResp struct {
@@ -1364,6 +1420,15 @@ func (s *MetaService) Data(w http.ResponseWriter, r *http.Request) {
 	}
 
 	data := s.cli.Data()
+	// set metad peers
+	peers := s.Node.Transport.ClonePeers()
+	data.MetaNodes = nil
+	for id, addr := range peers {
+		data.MetaNodes = append(data.MetaNodes, meta.NodeInfo{
+			ID:   id,
+			Host: addr,
+		})
+	}
 	resp.Data, err = data.MarshalBinary()
 	if err != nil {
 		resp.RetMsg = err.Error()
@@ -1374,6 +1439,46 @@ func (s *MetaService) Data(w http.ResponseWriter, r *http.Request) {
 	resp.RetMsg = "ok"
 }
 
+type FreezeDataNodeReq struct {
+	Id     uint64
+	Freeze bool
+}
+type FreezeDataNodeResp struct {
+	CommonResp
+}
+
+func (s *MetaService) FreezeDataNode(w http.ResponseWriter, r *http.Request) {
+	resp := new(FreezeDataNodeResp)
+	resp.RetCode = -1
+	resp.RetMsg = "fail"
+	defer WriteResp(w, &resp)
+
+	data, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("FreezeDataNode fail", zap.Error(err))
+		return
+	}
+
+	var req FreezeDataNodeReq
+	if err := json.Unmarshal(data, &req); err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error("FreezeDataNode fail", zap.Error(err))
+		return
+	}
+
+	err = s.ProposeAndWait(internal.FreezeDataNode, data, nil)
+	if err != nil {
+		resp.RetMsg = err.Error()
+		s.Logger.Error(fmt.Sprintf("FreezeDataNode fail, id=%d, freeze=%t", req.Id, req.Freeze), zap.Error(err))
+		return
+	}
+
+	resp.RetCode = 0
+	resp.RetMsg = "ok"
+	s.Logger.Info(fmt.Sprintf("FreezeDataNode ok, id=%d, freeze=%t", req.Id, req.Freeze))
+}
+
 type PingResp struct {
 	CommonResp
 	Index uint64
@@ -1381,7 +1486,7 @@ type PingResp struct {
 
 func (s *MetaService) Ping(w http.ResponseWriter, r *http.Request) {
 	resp := new(PingResp)
-	resp.Index = s.cli.Data().Index
+	resp.Index = s.cli.DataIndex()
 	resp.RetCode = 0
 	resp.RetMsg = "ok"
 	WriteResp(w, &resp)
@@ -1407,6 +1512,7 @@ func initHttpHandler(s *MetaService) {
 
 	http.HandleFunc(DROP_RETENTION_POLICY_PATH, s.DropRetentionPolicy)
 	http.HandleFunc(DELETE_DATA_NODE_PATH, s.DeleteDataNode)
+	http.HandleFunc(FREEZE_DATA_NODE_PATH, s.FreezeDataNode)
 	http.HandleFunc(CREATE_RETENTION_POLICY_PATH, s.CreateRetentionPolicy)
 	http.HandleFunc(UPDATE_RETENTION_POLICY_PATH, s.UpdateRetentionPolicy)
 	http.HandleFunc(CREATE_USER_PATH, s.CreateUser)
@@ -1416,6 +1522,7 @@ func initHttpHandler(s *MetaService) {
 	http.HandleFunc(SET_ADMIN_PRIVILEGE, s.SetAdminPrivilege)
 	http.HandleFunc(AUTHENTICATE_PATH, s.Authenticate)
 	http.HandleFunc(DROP_SHARD_PATH, s.DropShard)
+	http.HandleFunc(ADD_SHARD_OWNER, s.AddShardOwner)
 	http.HandleFunc(REMOVE_SHARD_OWNER, s.RemoveShardOwner)
 	http.HandleFunc(TRUNCATE_SHARD_GROUPS_PATH, s.TruncateShardGroups)
 	http.HandleFunc(PRUNE_SHARD_GROUPS_PATH, s.PruneShardGroups)

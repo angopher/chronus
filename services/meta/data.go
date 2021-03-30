@@ -2,6 +2,7 @@ package meta
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -14,8 +15,9 @@ import (
 // Data represents the top level collection of all metadata.
 type Data struct {
 	meta.Data
-	MetaNodes []meta.NodeInfo
-	DataNodes []meta.NodeInfo
+	MetaNodes        []meta.NodeInfo
+	DataNodes        []meta.NodeInfo
+	FreezedDataNodes []uint64 // data nodes that can't create new shard on
 
 	MaxNodeID uint64
 }
@@ -24,18 +26,20 @@ type Data struct {
 func (data *Data) DataNode(id uint64) *meta.NodeInfo {
 	for i := range data.DataNodes {
 		if data.DataNodes[i].ID == id {
-			return &data.DataNodes[i]
+			// prevent unexpected modification
+			n := data.DataNodes[i]
+			return &n
 		}
 	}
 	return nil
 }
 
-// CreateDataNode adds a node to the metadata.
-func (data *Data) CreateDataNode(host, tcpHost string) error {
+// CreateDataNode adds a node to the metadata, return the nodeId(0 when an error occurred) and error
+func (data *Data) CreateDataNode(host, tcpHost string) (uint64, error) {
 	// Ensure a node with the same host doesn't already exist.
 	for _, n := range data.DataNodes {
 		if n.TCPHost == tcpHost || n.Host == host {
-			return ErrNodeExists
+			return 0, ErrNodeExists
 		}
 	}
 
@@ -62,6 +66,65 @@ func (data *Data) CreateDataNode(host, tcpHost string) error {
 		TCPHost: tcpHost,
 	})
 	sort.Sort(meta.NodeInfos(data.DataNodes))
+
+	return existingID, nil
+}
+
+func existInNodes(nodes []meta.NodeInfo, id uint64) *meta.NodeInfo {
+	for _, n := range nodes {
+		if n.ID == id {
+			return &n
+		}
+	}
+	return nil
+}
+
+func getFreezed(freezed []uint64, id uint64) int {
+	for i, n := range freezed {
+		if n == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (data *Data) UnfreezeDataNode(id uint64) error {
+	if id == 0 {
+		return ErrNodeIDRequired
+	}
+
+	if existInNodes(data.DataNodes, id) == nil {
+		return ErrNodeNotFound
+	}
+
+	i := getFreezed(data.FreezedDataNodes, id)
+	if i == -1 {
+		return ErrNodeNotFreezed
+	}
+
+	data.FreezedDataNodes = append(data.FreezedDataNodes[:i], data.FreezedDataNodes[i+1:]...)
+
+	return nil
+}
+
+func (data *Data) IsFreezeDataNode(id uint64) bool {
+	return getFreezed(data.FreezedDataNodes, id) > -1
+}
+
+func (data *Data) FreezeDataNode(id uint64) error {
+	if id == 0 {
+		return ErrNodeIDRequired
+	}
+
+	if existInNodes(data.DataNodes, id) == nil {
+		return ErrNodeNotFound
+	}
+
+	if getFreezed(data.FreezedDataNodes, id) > -1 {
+		return ErrNodeAlreadyFreezed
+	}
+
+	data.FreezedDataNodes = append(data.FreezedDataNodes, id)
 
 	return nil
 }
@@ -95,7 +158,7 @@ func (data *Data) DeleteDataNode(id uint64) error {
 		for ri, rp := range d.RetentionPolicies {
 			for sgi, sg := range rp.ShardGroups {
 				var (
-					nodeOwnerFreqs = make(map[int]int)
+					nodeOwnerFreqs = make(map[uint64]int)
 					orphanedShards []meta.ShardInfo
 				)
 				// Look through all shards in the shard group and
@@ -111,7 +174,7 @@ func (data *Data) DeleteDataNode(id uint64) error {
 						if owner.NodeID == id {
 							nodeIdx = i
 						}
-						nodeOwnerFreqs[int(owner.NodeID)]++
+						nodeOwnerFreqs[owner.NodeID]++
 					}
 
 					if nodeIdx > -1 {
@@ -137,18 +200,19 @@ func (data *Data) DeleteDataNode(id uint64) error {
 
 				// Reassign any orphaned shards. Delete the node we're
 				// dropping from the list of potential new owners.
-				delete(nodeOwnerFreqs, int(id))
+				delete(nodeOwnerFreqs, id)
 
 				for _, orphan := range orphanedShards {
-					newOwnerID, err := newShardOwner(orphan, nodeOwnerFreqs)
-					if err != nil {
-						return err
+					newOwnerID := newShardOwner(nodeOwnerFreqs)
+					if newOwnerID == 0 {
+						return errors.New(fmt.Sprint("No node can be reassigned to ", orphan.ID))
 					}
 
 					for si, s := range sg.Shards {
 						if s.ID == orphan.ID {
 							sg.Shards[si].Owners = append(sg.Shards[si].Owners, meta.ShardOwner{NodeID: newOwnerID})
 							data.Databases[di].RetentionPolicies[ri].ShardGroups[sgi].Shards = sg.Shards
+							nodeOwnerFreqs[newOwnerID]++
 							break
 						}
 					}
@@ -157,10 +221,16 @@ func (data *Data) DeleteDataNode(id uint64) error {
 			}
 		}
 	}
+
+	// Delete from freezed nodes if necessarily
+	if i := getFreezed(data.FreezedDataNodes, id); i > -1 {
+		data.FreezedDataNodes = append(data.FreezedDataNodes[:i], data.FreezedDataNodes[i+1:]...)
+	}
+
 	return nil
 }
 
-func (data *Data) CloneNodes(src []meta.NodeInfo) []meta.NodeInfo {
+func cloneNodes(src []meta.NodeInfo) []meta.NodeInfo {
 	if len(src) == 0 {
 		return []meta.NodeInfo{}
 	}
@@ -176,44 +246,49 @@ func (data *Data) CloneNodes(src []meta.NodeInfo) []meta.NodeInfo {
 // that currently owns the fewest number of shards. If multiple nodes
 // own the same (fewest) number of shards, then one of those nodes
 // becomes the new shard owner.
-func newShardOwner(s meta.ShardInfo, ownerFreqs map[int]int) (uint64, error) {
-	var (
-		minId   = -1
-		minFreq int
-	)
+// ATTENTION: This method should guarantee that the result is stable between
+//	different metad instances.
+func newShardOwner(freqs map[uint64]int) uint64 {
+	if len(freqs) < 1 {
+		return 0
+	}
 
-	for id, freq := range ownerFreqs {
-		if minId == -1 || freq < minFreq {
-			minId, minFreq = int(id), freq
+	type item struct {
+		id   uint64
+		freq int
+	}
+	arr := make([]item, 0, len(freqs))
+	for id, freq := range freqs {
+		arr = append(arr, item{id, freq})
+	}
+	sort.Slice(arr, func(i, j int) bool {
+		if arr[i].freq != arr[j].freq {
+			return arr[i].freq < arr[j].freq
 		}
-	}
+		return arr[i].id < arr[j].id
+	})
 
-	if minId < 0 {
-		return 0, fmt.Errorf("cannot reassign shard %d due to lack of data nodes", s.ID)
-	}
-
-	// Update the shard owner frequencies and set the new owner on the
-	// shard.
-	ownerFreqs[minId]++
-	return uint64(minId), nil
+	return arr[0].id
 }
 
 // MetaNode returns a node by id.
 func (data *Data) MetaNode(id uint64) *meta.NodeInfo {
 	for i := range data.MetaNodes {
 		if data.MetaNodes[i].ID == id {
-			return &data.MetaNodes[i]
+			// prevent unexpected modification
+			n := data.MetaNodes[i]
+			return &n
 		}
 	}
 	return nil
 }
 
 // CreateMetaNode will add a new meta node to the metastore
-func (data *Data) CreateMetaNode(httpAddr, tcpAddr string) error {
+func (data *Data) CreateMetaNode(httpAddr, tcpAddr string) (uint64, error) {
 	// Ensure a node with the same host doesn't already exist.
 	for _, n := range data.MetaNodes {
 		if n.Host == httpAddr {
-			return ErrNodeExists
+			return 0, ErrNodeExists
 		}
 	}
 
@@ -242,7 +317,7 @@ func (data *Data) CreateMetaNode(httpAddr, tcpAddr string) error {
 	})
 
 	sort.Sort(meta.NodeInfos(data.MetaNodes))
-	return nil
+	return existingID, nil
 }
 
 // DeleteMetaNode will remove the meta node from the store
@@ -274,17 +349,20 @@ func (data *Data) Clone() *Data {
 
 	other.Databases = data.CloneDatabases()
 	other.Users = data.CloneUsers()
-	other.DataNodes = data.CloneNodes(data.DataNodes)
-	other.MetaNodes = data.CloneNodes(data.MetaNodes)
+	other.DataNodes = cloneNodes(data.DataNodes)
+	other.MetaNodes = cloneNodes(data.MetaNodes)
+	other.FreezedDataNodes = make([]uint64, len(data.FreezedDataNodes))
+	copy(other.FreezedDataNodes, data.FreezedDataNodes)
 
 	return &other
 }
 
 type DataJson struct {
-	Data      []byte
-	MetaNodes []meta.NodeInfo
-	DataNodes []meta.NodeInfo
-	MaxNodeID uint64
+	Data             []byte
+	MetaNodes        []meta.NodeInfo
+	DataNodes        []meta.NodeInfo
+	MaxNodeID        uint64
+	FreezedDataNodes []uint64
 }
 
 func (data *Data) marshal() ([]byte, error) {
@@ -292,6 +370,7 @@ func (data *Data) marshal() ([]byte, error) {
 	js.MetaNodes = data.MetaNodes
 	js.DataNodes = data.DataNodes
 	js.MaxNodeID = data.MaxNodeID
+	js.FreezedDataNodes = data.FreezedDataNodes
 	var err error
 	js.Data, err = data.Data.MarshalBinary()
 	if err != nil {
@@ -312,6 +391,7 @@ func (data *Data) unmarshal(buf []byte) error {
 	data.MetaNodes = js.MetaNodes
 	data.DataNodes = js.DataNodes
 	data.MaxNodeID = js.MaxNodeID
+	data.FreezedDataNodes = js.FreezedDataNodes
 	return data.Data.UnmarshalBinary(js.Data)
 }
 
@@ -346,18 +426,34 @@ func (data *Data) CreateShardGroup(database, policy string, timestamp time.Time)
 		return nil
 	}
 
+	// Don't create shard on freezed nodes
+	availableNodes := make([]meta.NodeInfo, 0, len(data.DataNodes))
+	freezedNodes := make(map[uint64]bool)
+	for _, n := range data.FreezedDataNodes {
+		freezedNodes[n] = true
+	}
+	for _, n := range data.DataNodes {
+		if freezedNodes[n.ID] {
+			continue
+		}
+		availableNodes = append(availableNodes, n)
+	}
+
 	// Require at least one replica but no more replicas than nodes.
 	replicaN := rpi.ReplicaN
 	if replicaN == 0 {
 		replicaN = 1
-	} else if replicaN > len(data.DataNodes) {
-		replicaN = len(data.DataNodes)
+	} else if replicaN > len(availableNodes) {
+		replicaN = len(availableNodes)
+	}
+	if replicaN < 1 {
+		return errors.New("No replica can be assigned")
 	}
 
 	// Determine shard count by node count divided by replication factor.
 	// This will ensure nodes will get distributed across nodes evenly and
 	// replicated the correct number of times.
-	shardN := len(data.DataNodes) / replicaN
+	shardN := len(availableNodes) / replicaN
 
 	// Create the shard group.
 	data.MaxShardGroupID++
@@ -379,11 +475,11 @@ func (data *Data) CreateShardGroup(database, policy string, timestamp time.Time)
 
 	// Assign data nodes to shards via round robin.
 	// Start from a repeatably "random" place in the node list.
-	nodeIndex := int(data.Index % uint64(len(data.DataNodes)))
+	nodeIndex := int(data.Index % uint64(len(availableNodes)))
 	for i := range sgi.Shards {
 		si := &sgi.Shards[i]
 		for j := 0; j < replicaN; j++ {
-			nodeID := data.DataNodes[nodeIndex%len(data.DataNodes)].ID
+			nodeID := availableNodes[nodeIndex%len(availableNodes)].ID
 			si.Owners = append(si.Owners, meta.ShardOwner{NodeID: nodeID})
 			nodeIndex++
 		}
@@ -439,4 +535,25 @@ func (data *Data) RemoveShardOwner(id, nodeID uint64) {
 			}
 		}
 	}
+}
+
+// DeleteShardGroup removes a shard group from a database and retention policy by id.
+func (data *Data) DeleteShardGroup(database, policy string, id uint64, t time.Time) error {
+	// Find retention policy.
+	rpi, err := data.RetentionPolicy(database, policy)
+	if err != nil {
+		return err
+	} else if rpi == nil {
+		return influxdb.ErrRetentionPolicyNotFound(policy)
+	}
+
+	// Find shard group by ID and set its deletion timestamp.
+	for i := range rpi.ShardGroups {
+		if rpi.ShardGroups[i].ID == id {
+			rpi.ShardGroups[i].DeletedAt = t.UTC()
+			return nil
+		}
+	}
+
+	return meta.ErrShardGroupNotFound
 }
